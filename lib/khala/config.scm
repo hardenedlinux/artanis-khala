@@ -26,7 +26,7 @@
     (cond
      ((member key '(port download_threads)) (or (string->number value) 0))
      ((member key '(persist_history persist_queue))
-      (member value '("yes" "true" "on")))
+      (and (member value '("yes" "true" "on")) #t))
      (else value))))
 
 (define (load-config . maybe-path)

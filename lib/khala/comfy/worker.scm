@@ -13,6 +13,7 @@
   #:use-module (khala comfy history)
   #:use-module (khala comfy lower)
   #:use-module (khala comfy ws)
+  #:use-module (khala comfy persistence-api)
   #:export (start-worker!))
 
 (define running? #f)
@@ -88,23 +89,26 @@
                                                        (json-encode json-workflow)))
                                                    pngs))))
                (output-nodes prompt))
-              (history-add! id
-                (obj (cons "prompt" (list (assq-ref item 'number) id
-                                           json-prompt (json-normalize extra)))
-                     (cons "outputs"
-                           (make-json-object
-                            (map (lambda (output)
-                                   (cons (car output) (obj (cons "images" images))))
-                                 (filter (lambda (node)
-                                           (equal? "SaveImage" (node-class node)))
-                                         (output-nodes prompt)))))
-                     (cons "status" (obj (cons "completed" #t)))))
+              (let ((record
+                     (obj (cons "prompt" (list (assq-ref item 'number) id
+                                                json-prompt (json-normalize extra)))
+                          (cons "outputs"
+                                (make-json-object
+                                 (map (lambda (output)
+                                        (cons (car output) (obj (cons "images" images))))
+                                      (filter (lambda (node)
+                                                (equal? "SaveImage" (node-class node)))
+                                              (output-nodes prompt))))
+                          (cons "status" (obj (cons "completed" #t)))))))
+                (history-add! id record)
+                (persistence-call config 'save-history! id record))
               (send client "execution_success"
                     (obj (cons "prompt_id" id) (cons "timestamp" 0)))
               (send client "executing"
                     (obj (cons "node" 'null) (cons "prompt_id" id))))))))))
 
 (define (run-queued! config item)
+  (persistence-call config 'mark-queue-item-done! (assq-ref item 'prompt_id))
   (queue-reset-interrupt!)
   (dynamic-wind
     (lambda () #t)

@@ -12,4 +12,5 @@
  (use-modules (khala config) (khala comfy routes) (khala comfy worker))
  (define khala-config (load-config))
  (register-routes! khala-config)
+ (restore-persisted-queue! khala-config)
  (start-worker! khala-config)

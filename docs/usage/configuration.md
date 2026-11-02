@@ -19,4 +19,5 @@ Khala reads `conf/khala.conf`. Values use `key = value`; blank lines and `#` com
 
 The model folders below `models_root` are `checkpoints`, `diffusion_models`, `unet`, `text_encoders`, `clip`, `vae`, `loras`, `embeddings`, and `upscale_models`.
 
-Artanis uses its SQLite3 backend for local persistence; Khala does not require a PostgreSQL service.
+When either persistence option is enabled, Khala uses the installed Guile DBI
+SQLite driver and the path in `history_db`. It does not require PostgreSQL.
