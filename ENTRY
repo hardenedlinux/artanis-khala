@@ -9,4 +9,7 @@
 
  (init-server #:statics '(png gif jpg jpeg ico html js json csv xml css woff woff2 ttf))
  (add-to-load-path (string-append (current-toplevel) "/lib"))
- ;; Put whatever you want to be called before server running here
+ (use-modules (khala config) (khala comfy routes) (khala comfy worker))
+ (define khala-config (load-config))
+ (register-routes! khala-config)
+ (start-worker! khala-config)

@@ -85,3 +85,18 @@ claude/patches
 *.zip
 # UI export staging (scripts/update-ui.sh)
 ui/
+node_modules/
+dist/
+build/
+*.log
+*.db
+*.sqlite
+.cache/
+var/
+input/
+output/
+temp/
+models/
+vendor/comfyui-frontend/
+pub/
+tmp/
