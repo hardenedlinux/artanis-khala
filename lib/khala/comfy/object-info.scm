@@ -2,6 +2,7 @@
   #:use-module (khala config)
   #:use-module (khala json)
   #:use-module (khala models)
+  #:use-module (khala engine)
   #:use-module (ice-9 ftw)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-13)
@@ -167,6 +168,16 @@
                                          (else "image"))
                                    (folder-files config folder)))
                            entry)))
+                   all))
+         (options (engine-sampler-options
+                   (string->symbol (or (config-ref config 'engine) "fake"))))
+         (all (map (lambda (entry)
+                     (if (string=? (car entry) "KSampler")
+                         (cons (car entry)
+                               (replace-combo
+                                (replace-combo (cdr entry) "sampler_name" (car options))
+                                "scheduler" (cdr options)))
+                         entry))
                    all)))
     (if (null? maybe-name)
         all

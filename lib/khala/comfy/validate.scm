@@ -1,6 +1,8 @@
 (define-module (khala comfy validate)
   #:use-module (khala comfy object-info)
   #:use-module (khala json)
+  #:use-module (khala config)
+  #:use-module (khala engine)
   #:use-module (srfi srfi-1)
   #:export (validate-prompt))
 
@@ -13,15 +15,15 @@
    (list (cons "type" type) (cons "message" message)
          (cons "details" details) (cons "extra_info" extra))))
 
-(define (combo-error class inputs)
+(define (combo-error config class inputs)
   (and (string=? class "KSampler")
        (find
         (lambda (entry)
           (let* ((field (car entry)) (value (cdr entry))
-                 (allowed (cond ((string=? field "sampler_name")
-                                 '("euler" "euler_ancestral" "dpmpp_2m"))
-                                ((string=? field "scheduler")
-                                 '("normal" "karras" "simple"))
+                 (options (engine-sampler-options
+                                           (string->symbol (or (config-ref config 'engine) "fake"))))
+                 (allowed (cond ((string=? field "sampler_name") (car options))
+                                ((string=? field "scheduler") (cdr options))
                                 (else #f))))
             (and allowed (not (member value allowed)) (cons field value))))
         inputs)))
@@ -72,7 +74,7 @@
                         (missing (filter (lambda (input)
                                            (not (assoc (car input) inputs)))
                                          required)))
-                   (let ((bad-combo (combo-error class inputs)))
+                   (let ((bad-combo (combo-error config class inputs)))
                    (if (and (null? missing) (not bad-combo))
                        #f
                        (cons node-id

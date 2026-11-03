@@ -69,6 +69,7 @@
         (values
          (list (cons 'model (or (and checkpoint (node-input checkpoint "ckpt_name"))
                                 (and unet (node-input unet "unet_name"))))
+               (cons 'model_folder (if checkpoint "checkpoints" "diffusion_models"))
                (cons 'positive (if positive (node-input positive "text" "") ""))
                (cons 'negative (if negative (node-input negative "text" "") ""))
                (cons 'width (or (and latent (node-input latent "width")) 512))

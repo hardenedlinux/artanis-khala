@@ -9,6 +9,7 @@
   #:use-module (khala config)
   #:use-module (khala json)
   #:use-module (khala engine)
+  #:use-module (khala models)
   #:use-module (khala png)
   #:use-module (khala comfy queue)
   #:use-module (khala comfy history)
@@ -86,6 +87,13 @@
     (bytevector-copy! png 0 frame 8 (bytevector-length png))
     frame))
 (define (image-frame png) (bytevector->ws-buffer (image-frame-bytes png)))
+(define (with-model-path config params)
+  ;; Resolve the model name chosen in the ComfyUI COMBO to an absolute path
+  ;; inside its model folder; engines only ever see model_path.
+  (let* ((name (assq-ref params 'model))
+         (folder (or (assq-ref params 'model_folder) "checkpoints"))
+         (path (and name (model-file-path config folder name))))
+    (if path (acons 'model_path path params) params)))
 (define (preview-step? step) (zero? (modulo step 5)))
 
 (define (execute-prompt! config item)
@@ -134,13 +142,15 @@
                  (pngs (if all-cached?
                            last-successful-pngs
                            (if load-image
-                               (list
-                                (call-with-input-file
-                                    (string-append
-                                     (config-ref config 'input_dir) "/"
-                                     (or (assq-ref params 'load_image) ""))
-                                  get-bytevector-all))
-                               (engine-run-t2i params #:engine engine-name
+                               (let ((path (contained-path
+                                            (config-ref config 'input_dir)
+                                            (or (assq-ref params 'load_image) ""))))
+                                 (unless path
+                                   (error "LoadImage: image is not inside the input directory"
+                                          (assq-ref params 'load_image)))
+                                 (list (call-with-input-file path get-bytevector-all)))
+                               (engine-run-t2i (with-model-path config params)
+                                 #:engine engine-name
                                  #:cancelled? queue-interrupted?
                                  #:on-progress
                                  (lambda (step total)
@@ -206,7 +216,9 @@
          (id (assq-ref item 'prompt_id)))
     (format (current-error-port) "Khala prompt ~a failed: ~s ~s~%" id key args)
     (display-backtrace (make-stack #t) (current-error-port))
-    (if (eq? key 'khala-interrupted)
+    ;; An engine may report cancellation in its own way (SonicBoom raises a
+    ;; &sonicboom-error of kind 'cancelled), so the interrupt flag decides.
+    (if (or (eq? key 'khala-interrupted) (queue-interrupted?))
         (ws-broadcast!
          (obj (cons "type" "execution_interrupted")
               (cons "data"

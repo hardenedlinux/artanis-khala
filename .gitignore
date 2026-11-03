@@ -83,8 +83,8 @@ sys/themes/*
 pub/css/theme/*
 claude/patches
 *.zip
-# UI export staging (scripts/update-ui.sh)
-ui/
+# Khala UI build output (sources under ui/ are tracked)
+ui/dist/
 node_modules/
 dist/
 build/
