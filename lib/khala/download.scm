@@ -125,7 +125,7 @@
         (let ((result (curl-easy-perform h #f #t)))
           (and result
                (let ((size (curl-easy-getinfo h 'content-length-download-t)))
-                 (and (number? size) (>= size 0) size)))))
+                 (and (number? size) (> size 0) size)))))
       (lambda () (curl-easy-cleanup h)))))
 
 (define (header-ref headers key)
@@ -148,7 +148,7 @@
             (error "HEAD request failed" (curl-error-code) (curl-error-string)))
           (let ((size (curl-easy-getinfo h 'content-length-download-t))
                 (headers (car result)))
-            (cons (and (number? size) (>= size 0) size)
+            (cons (and (number? size) (> size 0) size)
                   (or (header-ref headers "X-Linked-Etag")
                       (header-ref headers "ETag"))))))
       (lambda () (curl-easy-cleanup h)))))
@@ -279,9 +279,10 @@
     (let ((count (curl-easy-perform-to-fd handle fd start)))
       (unregister-active! job handle)
       (unless (and (number? count) (= count size))
-        (let ((message (format #f "chunk write got ~s bytes, expected ~s; curl ~a: ~a"
-                               count size (curl-error-code) (curl-error-string))))
-          (with-mutex (job-lock job) (set-error! job message))
+        (let* ((http (guard (ex (#t #f))
+                       (curl-easy-getinfo handle 'response-code)))
+               (message (format #f "chunk write got ~s bytes, expected ~s; HTTP ~s; curl ~a: ~a"
+                                count size http (curl-error-code) (curl-error-string))))
           (format (current-error-port) "khala/download ~a~%" message)))
       (and (number? count) (= count size)))))
 (define (mark-complete! job index key)
