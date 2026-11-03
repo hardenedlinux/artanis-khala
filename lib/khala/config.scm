@@ -37,7 +37,9 @@
      (else value))))
 
 (define (load-config . maybe-path)
-  (let ((path (if (null? maybe-path) "conf/khala.conf" (car maybe-path))))
+  (let ((path (if (null? maybe-path)
+                  (or (getenv "KHALA_CONFIG") "conf/khala.conf")
+                  (car maybe-path))))
     (if (not (file-exists? path))
         defaults
         (call-with-input-file path

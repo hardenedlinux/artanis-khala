@@ -51,12 +51,22 @@
               (canonical
                (map (lambda (field)
                       (cons (car field)
-                            (let ((value (cdr field)))
-                              (if (and (list? value) (= (length value) 2)
-                                       (string? (car value))
-                                       (number? (cadr value))
-                                       (assoc (car value) prompt))
-                                  (list "khala-link" (or (assoc-ref known (car value)) "missing"))
+                            (let* ((value (cdr field))
+                                   (link
+                                    (cond
+                                     ((and (vector? value)
+                                           (= (vector-length value) 2)
+                                           (string? (vector-ref value 0))
+                                           (number? (vector-ref value 1)))
+                                      (vector-ref value 0))
+                                     ((and (list? value) (= (length value) 2)
+                                           (string? (car value))
+                                           (number? (cadr value)))
+                                      (car value))
+                                     (else #f))))
+                              (if (and link (assoc link prompt))
+                                  (list "khala-link"
+                                        (or (assoc-ref known link) "missing"))
                                   value))))
                     inputs))
               (fingerprint (format #f "~s" (list (assoc-ref body "class_type") canonical))))
@@ -83,6 +93,9 @@
          (client (assq-ref item 'client_id))
          (prompt (assq-ref item 'prompt))
          (extra (or (assq-ref item 'extra_data) '()))
+         (load-image (find (lambda (node)
+                             (equal? "LoadImage" (node-class node)))
+                           prompt))
          (json-prompt (json-normalize prompt))
          (json-workflow (json-normalize (or (assoc-ref extra "extra_pnginfo") '()))))
     (let ((preview-png (rgb->png 1 1 #vu8(80 110 150))))
@@ -120,15 +133,25 @@
           (let* ((engine-name (string->symbol (config-ref config 'engine)))
                  (pngs (if all-cached?
                            last-successful-pngs
-                           (engine-run-t2i params #:engine engine-name
-                       #:cancelled? queue-interrupted?
-                       #:on-progress
-                       (lambda (step total)
-                         (send client "progress"
-                               (obj (cons "value" step) (cons "max" total)
-                                    (cons "prompt_id" id)))
-                         (when (and client sampler-id (preview-step? step))
-                           (ws-send-client! client (image-frame preview-png)))))))
+                           (if load-image
+                               (list
+                                (call-with-input-file
+                                    (string-append
+                                     (config-ref config 'input_dir) "/"
+                                     (or (assq-ref params 'load_image) ""))
+                                  get-bytevector-all))
+                               (engine-run-t2i params #:engine engine-name
+                                 #:cancelled? queue-interrupted?
+                                 #:on-progress
+                                 (lambda (step total)
+                                   (send client "progress"
+                                         (obj (cons "value" step)
+                                              (cons "max" total)
+                                              (cons "prompt_id" id)))
+                                   (when (and client sampler-id
+                                              (preview-step? step))
+                                     (ws-send-client!
+                                      client (image-frame preview-png))))))))
                  (directory (config-ref config 'output_dir)))
             (for-each (lambda (node-id)
                         (unless (member node-id cached) (send-executing! client node-id id)))

@@ -2,6 +2,7 @@
   #:use-module (khala config)
   #:use-module (khala json)
   #:use-module (khala models)
+  #:use-module (ice-9 ftw)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-13)
   #:export (object-info))

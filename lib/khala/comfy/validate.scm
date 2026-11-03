@@ -111,6 +111,7 @@
                                (string=? (ref (cdr entry) "class_type" "")
                                          "EmptyImage"))
                              nodes))
+                   (load-image-output? nodes)
                    (t2i-shape? nodes)))))
     (if (pair? errors)
         (values #f (validation-failure errors "Prompt outputs failed validation"))
@@ -167,3 +168,9 @@
          (member "KSampler" classes)
          (member "VAEDecode" classes)
          (or (member "SaveImage" classes) (member "PreviewImage" classes)))))
+
+(define (load-image-output? nodes)
+  (let ((classes (map (lambda (entry) (ref (cdr entry) "class_type")) nodes)))
+    (and (member "LoadImage" classes)
+         (or (member "SaveImage" classes)
+             (member "PreviewImage" classes)))))
