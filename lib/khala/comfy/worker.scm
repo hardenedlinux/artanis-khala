@@ -5,6 +5,7 @@
   #:use-module (rnrs bytevectors)
   #:use-module (rnrs io ports)
   #:use-module (srfi srfi-1)
+  #:use-module (srfi srfi-34)
   #:use-module (khala config)
   #:use-module (khala json)
   #:use-module (khala engine)
@@ -113,7 +114,9 @@
                             '())))
           (for-each (lambda (node-id)
                       (unless (member node-id cached) (send-executing! client node-id id)))
-                    order)
+                    before)
+          (when (and sampler-id (not (member sampler-id cached)))
+            (send-executing! client sampler-id id))
           (let* ((engine-name (string->symbol (config-ref config 'engine)))
                  (pngs (if all-cached?
                            last-successful-pngs
@@ -127,6 +130,9 @@
                          (when (and client sampler-id (preview-step? step))
                            (ws-send-client! client (image-frame preview-png)))))))
                  (directory (config-ref config 'output_dir)))
+            (for-each (lambda (node-id)
+                        (unless (member node-id cached) (send-executing! client node-id id)))
+                      (if sampler-id (cdr after) '()))
             (when (queue-interrupted?) (throw 'khala-interrupted id))
             (unless (file-exists? directory) (mkdir directory #o755))
             (let ((images
@@ -212,7 +218,11 @@
     (call-with-new-thread
      (lambda ()
        (let loop ()
-         (let ((item (queue-take!)))
-           (if item (run-queued! config item) (usleep 50000)))
+         (guard (ex
+                 (#t
+                  (format (current-error-port) "Khala worker loop failed: ~s~%" ex)
+                  (display-backtrace (make-stack #t) (current-error-port))))
+           (let ((item (queue-take!)))
+             (if item (run-queued! config item) (usleep 50000))))
          (loop)))))
   #t)

@@ -74,7 +74,7 @@
      (cons "CLIPTextEncode"
        (schema "CLIPTextEncode" "CLIP Text Encode" "model/conditioning"
         (list (input "text" (scalar "STRING" (obj (field "multiline" #t) (field "dynamicPrompts" #t))))
-              (basic "CLIP"))
+              (basic "clip"))
         '("CONDITIONING") '("CONDITIONING") #f #f))
      (cons "EmptyLatentImage"
        (schema "EmptyLatentImage" "Empty Latent Image" "model/latent"
@@ -83,7 +83,7 @@
         '("LATENT") '("LATENT") #f #f))
      (cons "KSampler"
        (schema "KSampler" "KSampler" "model/sampling"
-        (list (basic "MODEL") (int "seed" 0 0 18446744073709551615 1)
+        (list (basic "model") (int "seed" 0 0 18446744073709551615 1)
               (int "steps" 20 1 10000 1) (float "cfg" 8.0 0.0 100.0 0.1)
               (input "sampler_name" (combo '("euler" "euler_ancestral" "dpmpp_2m")))
               (input "scheduler" (combo '("normal" "karras" "simple")))
@@ -94,15 +94,15 @@
         '("LATENT") '("LATENT") #f #f))
      (cons "VAEDecode"
        (schema "VAEDecode" "VAE Decode" "model/latent"
-        (list (basic "LATENT") (basic "VAE")) '("IMAGE") '("IMAGE") #f #f))
+        (list (basic "samples") (basic "vae")) '("IMAGE") '("IMAGE") #f #f))
      (cons "SaveImage"
        (schema "SaveImage" "Save Image" "image"
-        (list (basic "IMAGE") (str "filename_prefix" "ComfyUI"))
+        (list (basic "images") (str "filename_prefix" "ComfyUI"))
         '("IMAGE") '("images") #t
         (list (input "prompt" (scalar "PROMPT" #f))
               (input "extra_pnginfo" (scalar "EXTRA_PNGINFO" #f)))))
      (cons "PreviewImage"
-       (schema "PreviewImage" "Preview Image" "image" (list (basic "IMAGE"))
+       (schema "PreviewImage" "Preview Image" "image" (list (basic "images"))
         '("IMAGE") '("images") #t
         (list (input "prompt" (scalar "PROMPT" #f))
               (input "extra_pnginfo" (scalar "EXTRA_PNGINFO" #f)))))
