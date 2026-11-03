@@ -155,6 +155,7 @@
 
 (define mirror-cache (make-hash-table))
 (define mirror-cache-lock (make-mutex))
+(define last-probe-scores '())
 (define (ticks) (get-internal-real-time))
 (define (ticks-per-second) internal-time-units-per-second)
 (define (cached-source sources)
@@ -200,6 +201,10 @@
                (ranked (sort (map join-thread threads)
                              (lambda (a b) (> (car a) (car b)))))
                (ordered (map cdr (filter (lambda (x) (> (car x) 0)) ranked))))
+          (set! last-probe-scores
+                (map (lambda (result)
+                       (cons (name (ref (cdr result) 'name)) (car result)))
+                     ranked))
           (when (pair? ordered)
             (let ((winner (car ordered)))
               (with-mutex mirror-cache-lock
