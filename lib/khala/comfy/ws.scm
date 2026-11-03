@@ -12,7 +12,9 @@
   (with-mutex lock (set! clients (acons client-id connection clients)))
   client-id)
 (define (ws-unregister! client-id)
-  (with-mutex lock (set! clients (assoc-delete-all client-id clients))))
+  (with-mutex lock
+    (set! clients
+          (filter (lambda (entry) (not (equal? (car entry) client-id))) clients))))
 (define (ws-send-client! client-id message)
   (let ((connection (with-mutex lock (assoc-ref clients client-id))))
     (and connection
