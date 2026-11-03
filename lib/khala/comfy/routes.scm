@@ -60,19 +60,25 @@
              (ws-dispatcher
               #:on-open
               (lambda (connection)
-                (ws-register! sid connection)
-                (ws-send connection
-                  (json-encode
-                   (obj (cons "type" "status")
-                        (cons "data"
-                              (obj (cons "status"
-                                         (obj (cons "exec_info"
-                                                    (obj (cons "queue_remaining"
-                                                               (length (queue-list)))))))
-                                   (cons "sid" sid))))))
+                (catch #t
+                  (lambda ()
+                    (ws-register! sid connection)
+                    (ws-send connection
+                      (json-encode
+                       (obj (cons "type" "status")
+                            (cons "data"
+                                  (obj (cons "status"
+                                             (obj (cons "exec_info"
+                                                        (obj (cons "queue_remaining"
+                                                                   (length (queue-list)))))))
+                                       (cons "sid" sid)))))))
+                  (lambda (key . args)
+                    (format (current-error-port) "Khala WebSocket open error: ~s ~s~%"
+                            key args)
+                    (apply throw key args))))
               #:on-message (lambda (_connection _message) #t)
               #:on-close (lambda (_connection _code _reason)
-                           (ws-unregister! sid)))))))
+                           (ws-unregister! sid))))))
     (route "/models" (lambda _ (reply model-folders)))
     (for-each
      (lambda (folder)
