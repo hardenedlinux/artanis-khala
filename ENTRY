@@ -9,8 +9,9 @@
 
  (init-server #:statics '(png gif jpg jpeg ico html js json csv xml css woff woff2 ttf))
  (add-to-load-path (string-append (current-toplevel) "/lib"))
- (use-modules (khala config) (khala comfy routes) (khala comfy worker))
+ (use-modules (khala config) (khala comfy routes) (khala comfy worker) (khala ollama))
  (define khala-config (load-config))
  (register-routes! khala-config)
+ (register-ollama-routes! khala-config)
  (restore-persisted-queue! khala-config)
  (start-worker! khala-config)

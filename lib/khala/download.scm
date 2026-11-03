@@ -211,12 +211,15 @@
                 (hash-set! mirror-cache (ref winner 'host)
                            (cons (+ (ticks) (* (cfg 'mirror_cache_minutes) 60
                                                (ticks-per-second)))
-                                 (ref winner 'name)))))
-          (append ordered (filter (lambda (s) (not (member s ordered))) sources)))))))
+                                 (ref winner 'name))))))
+          (append ordered (filter (lambda (s) (not (member s ordered))) sources))))))
 (define (select-sources entry)
   (let* ((sources (catalog-sources entry)) (mirror (cfg 'mirror)))
     (if (or (not mirror) (equal? mirror "auto"))
-        (rank-sources sources)
+        (let ((ranked (rank-sources sources)))
+          ;; Keep catalog order usable when every probe fails or a probe
+          ;; implementation returns no ranking.
+          (if (list? ranked) ranked sources))
         (let ((chosen (find (lambda (s) (equal? (name (ref s 'name)) mirror)) sources)))
           (if chosen (list chosen) '())))))
 
@@ -275,6 +278,11 @@
     (register-active! job handle size)
     (let ((count (curl-easy-perform-to-fd handle fd start)))
       (unregister-active! job handle)
+      (unless (and (number? count) (= count size))
+        (let ((message (format #f "chunk write got ~s bytes, expected ~s; curl ~a: ~a"
+                               count size (curl-error-code) (curl-error-string))))
+          (with-mutex (job-lock job) (set-error! job message))
+          (format (current-error-port) "khala/download ~a~%" message)))
       (and (number? count) (= count size)))))
 (define (mark-complete! job index key)
   (with-mutex (job-lock job)
@@ -318,7 +326,8 @@
                 (when i
                   (unless (fetch-with-retry! job handle i fd key)
                     (unless (job-cancelled? job)
-                      (set-error! job (format #f "all sources failed for chunk ~a" i))))
+                      (unless (job-error job)
+                        (set-error! job (format #f "all sources failed for chunk ~a" i)))))
                   (loop)))))))
       (lambda ()
         (curl-easy-cleanup handle)

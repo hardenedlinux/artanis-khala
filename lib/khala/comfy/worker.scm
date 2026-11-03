@@ -14,10 +14,11 @@
   #:use-module (khala comfy lower)
   #:use-module (khala comfy ws)
   #:use-module (khala comfy persistence-api)
-  #:export (start-worker! image-frame image-frame-bytes preview-step?))
+  #:export (start-worker! image-frame image-frame-bytes preview-step?
+            workflow-fingerprints))
 
 (define running? #f)
-(define last-successful-prompt #f)
+(define last-successful-fingerprints '())
 (define last-successful-pngs '())
 (define (obj . fields) (make-json-object fields))
 (define (broadcast-queue-status!)
@@ -39,6 +40,29 @@
 (define (output-nodes prompt)
   (filter (lambda (node) (member (node-class node) '("SaveImage" "PreviewImage"))) prompt))
 
+(define (workflow-fingerprints prompt order)
+  (let ((known '()))
+    (for-each
+     (lambda (id)
+       (let* ((node (assoc id prompt))
+              (body (cdr node))
+              (inputs (assoc-ref body "inputs"))
+              (canonical
+               (map (lambda (field)
+                      (cons (car field)
+                            (let ((value (cdr field)))
+                              (if (and (list? value) (= (length value) 2)
+                                       (string? (car value))
+                                       (number? (cadr value))
+                                       (assoc (car value) prompt))
+                                  (list "khala-link" (or (assoc-ref known (car value)) "missing"))
+                                  value))))
+                    inputs))
+              (fingerprint (format #f "~s" (list (assoc-ref body "class_type") canonical))))
+         (set! known (acons id fingerprint known))))
+     order)
+    known))
+
 (define (write-png path bytes)
   (let ((port (open-file path "wb")))
     (put-bytevector port bytes)
@@ -59,16 +83,21 @@
          (prompt (assq-ref item 'prompt))
          (extra (or (assq-ref item 'extra_data) '()))
          (json-prompt (json-normalize prompt))
-         (cache-key (list json-prompt (assoc-ref extra "fail_at_step")))
          (json-workflow (json-normalize (or (assoc-ref extra "extra_pnginfo") '()))))
     (let ((preview-png (rgb->png 1 1 #vu8(80 110 150))))
     (call-with-values
         (lambda () (lower-workflow prompt))
       (lambda (params order)
+        (let* ((fingerprints (workflow-fingerprints prompt order))
+               (cached (filter (lambda (node-id)
+                                 (equal? (assoc-ref fingerprints node-id)
+                                         (assoc-ref last-successful-fingerprints node-id)))
+                               order))
+               (all-cached? (and (pair? order) (= (length cached) (length order)))))
         (send client "execution_start" (obj (cons "prompt_id" id) (cons "timestamp" 0)))
-        (when (equal? cache-key last-successful-prompt)
+        (when (pair? cached)
           (send client "execution_cached"
-                (obj (cons "prompt_id" id) (cons "nodes" order) (cons "timestamp" 0))))
+                (obj (cons "prompt_id" id) (cons "nodes" cached) (cons "timestamp" 0))))
         (when (and params order)
           (let* ((sampler (find (lambda (node) (equal? "KSampler" (node-class node)))
                                 prompt))
@@ -82,11 +111,11 @@
                  (after (if sampler-id (drop-while (lambda (node-id)
                                                     (not (equal? node-id sampler-id))) order)
                             '())))
-          (unless (equal? cache-key last-successful-prompt)
-            (for-each (lambda (node-id) (send-executing! client node-id id)) before)
-            (when sampler-id (send-executing! client sampler-id id)))
+          (for-each (lambda (node-id)
+                      (unless (member node-id cached) (send-executing! client node-id id)))
+                    order)
           (let* ((engine-name (string->symbol (config-ref config 'engine)))
-                 (pngs (if (equal? cache-key last-successful-prompt)
+                 (pngs (if all-cached?
                            last-successful-pngs
                            (engine-run-t2i params #:engine engine-name
                        #:cancelled? queue-interrupted?
@@ -99,9 +128,6 @@
                            (ws-send-client! client (image-frame preview-png)))))))
                  (directory (config-ref config 'output_dir)))
             (when (queue-interrupted?) (throw 'khala-interrupted id))
-            (unless (equal? cache-key last-successful-prompt)
-              (for-each (lambda (node-id) (send-executing! client node-id id))
-                        (if sampler-id (cdr after) '())))
             (unless (file-exists? directory) (mkdir directory #o755))
             (let ((images
                    (map (lambda (png index)
@@ -137,10 +163,10 @@
                 (persistence-call config 'save-history! id record))
               (send client "execution_success"
                     (obj (cons "prompt_id" id) (cons "timestamp" 0)))
-              (set! last-successful-prompt cache-key)
+              (set! last-successful-fingerprints fingerprints)
               (set! last-successful-pngs pngs)
               (send client "executing"
-                    (obj (cons "node" 'null) (cons "prompt_id" id))))))))))))
+                    (obj (cons "node" 'null) (cons "prompt_id" id)))))))))))))
 
 (define (handle-prompt-error! item key args)
   (let* ((prompt (assq-ref item 'prompt))
