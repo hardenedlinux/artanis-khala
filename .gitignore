@@ -96,7 +96,7 @@ var/
 input/
 output/
 temp/
-/models/
+/models
 vendor/comfyui-frontend/
 pub/
 tmp/
