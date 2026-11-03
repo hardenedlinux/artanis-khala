@@ -154,21 +154,28 @@
                               (cons "output" (obj (cons "images" images)))
                               (cons "prompt_id" id)))))
                (output-nodes prompt))
-              (let ((record
-                     (obj (cons "prompt" (list (assq-ref item 'number) id
-                                                json-prompt (json-normalize extra)))
-                          (cons "outputs"
-                                (make-json-object
-                                 (map (lambda (output)
-                                        (cons (car output) (obj (cons "images" images))))
-                                      (filter (lambda (node)
-                                                (equal? "SaveImage" (node-class node)))
-                                              (output-nodes prompt))))
-                          (cons "status" (obj (cons "completed" #t)))))))
+              (format (current-error-port) "Khala prompt ~a: output events sent~%" id)
+              (let* ((prompt-field
+                      (cons "prompt" (list (assq-ref item 'number) id
+                                            json-prompt (json-normalize extra))))
+                     (save-nodes
+                      (filter (lambda (node)
+                                (equal? "SaveImage" (node-class node)))
+                              (output-nodes prompt)))
+                     (output-fields
+                      (map (lambda (output)
+                             (cons (car output) (obj (cons "images" images))))
+                           save-nodes))
+                     (outputs-field (cons "outputs" (make-json-object output-fields)))
+                     (status-field (cons "status" (obj (cons "completed" #t))))
+                     (record (obj prompt-field outputs-field status-field)))
+                (format (current-error-port) "Khala prompt ~a: history record built~%" id)
                 (history-add! id record)
+                (format (current-error-port) "Khala prompt ~a: history added~%" id)
                 (persistence-call config 'save-history! id record))
               (send client "execution_success"
                     (obj (cons "prompt_id" id) (cons "timestamp" 0)))
+              (format (current-error-port) "Khala prompt ~a: success sent~%" id)
               (set! last-successful-fingerprints fingerprints)
               (set! last-successful-pngs pngs)
               (send client "executing"
@@ -178,6 +185,8 @@
   (let* ((prompt (assq-ref item 'prompt))
          (sampler (find (lambda (node) (equal? "KSampler" (node-class node))) prompt))
          (id (assq-ref item 'prompt_id)))
+    (format (current-error-port) "Khala prompt ~a failed: ~s ~s~%" id key args)
+    (display-backtrace (make-stack #t) (current-error-port))
     (if (eq? key 'khala-interrupted)
         (ws-broadcast!
          (obj (cons "type" "execution_interrupted")
@@ -186,9 +195,7 @@
                          (cons "node_id" (if sampler (car sampler) 'null))
                          (cons "node_type" (if sampler "KSampler" 'null))
                          (cons "executed" '()) (cons "timestamp" 0)))))
-        (begin
-          (format (current-error-port) "Khala prompt ~a failed: ~s ~s~%" id key args)
-          (send (assq-ref item 'client_id) "execution_error"
+        (send (assq-ref item 'client_id) "execution_error"
                 (obj (cons "prompt_id" id)
                      (cons "node_id" (if sampler (car sampler) 'null))
                      (cons "node_type" (if sampler "KSampler" 'null))
@@ -198,7 +205,7 @@
                      (cons "traceback" '())
                      (cons "current_inputs" '())
                      (cons "current_outputs" '())
-                     (cons "timestamp" 0)))))))
+                     (cons "timestamp" 0))))))
 
 (define (run-queued! config item)
   (persistence-call config 'mark-queue-item-done! (assq-ref item 'prompt_id))
