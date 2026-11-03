@@ -26,6 +26,35 @@
 
 (define config (load-config))
 
+(define (asset-type path)
+  (cond ((string-suffix? ".js" path) '(application/javascript))
+        ((string-suffix? ".css" path) '(text/css))
+        ((string-suffix? ".svg" path) '(image/svg+xml))
+        ((string-suffix? ".png" path) '(image/png))
+        (else '(application/octet-stream))))
+
+(define (serve-file path)
+  (response-emit (call-with-input-file path get-bytevector-all)
+                 #:headers `((content-type . ,(asset-type path)))))
+
+(define (missing-ui-page rc)
+  (let ((accept (or (get-header rc 'accept-language) "en")))
+    (cond
+     ((string-prefix? "zh" accept)
+      "<h1>Khala UI 尚未构建</h1><p>请在 ui/ 运行 <code>npm ci &amp;&amp; npm run build</code>，或执行 tools/build-ui.sh。</p>")
+     ((string-prefix? "ja" accept)
+      "<h1>Khala UI は未ビルドです</h1><p>ui/ で <code>npm ci &amp;&amp; npm run build</code> を実行するか、tools/build-ui.sh を使用してください。</p>")
+     (else
+      "<h1>Khala UI is not built</h1><p>Run <code>npm ci &amp;&amp; npm run build</code> in ui/, or run tools/build-ui.sh.</p>"))))
+
+(define (serve-ui rc)
+  (let ((index "ui/dist/index.html"))
+    (if (file-exists? index)
+        (response-emit (call-with-input-file index get-bytevector-all)
+                       #:headers '((content-type . (text/html))))
+        (response-emit (missing-ui-page rc)
+                       #:headers '((content-type . (text/html)))))))
+
 (get "/khala/api/downloads"
      (lambda _ (reply-json (khala-downloads))))
 (post "/khala/api/downloads"
@@ -60,3 +89,11 @@
 (put "/khala/api/settings"
      (lambda (rc)
        (reply-json (khala-save-settings! (load-config) (body-json rc)))))
+(get "/khala" (lambda (rc) (serve-ui rc)))
+(get "/khala/:path" (lambda (rc) (serve-ui rc)))
+(get "/khala/assets/:asset"
+     (lambda (rc)
+       (let ((path (string-append "ui/dist/assets/" (params rc "asset"))))
+         (if (file-exists? path)
+             (serve-file path)
+             (response-emit "Not found" #:status 404)))))
