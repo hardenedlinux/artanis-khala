@@ -85,8 +85,8 @@
        (schema "KSampler" "KSampler" "model/sampling"
         (list (basic "MODEL") (int "seed" 0 0 18446744073709551615 1)
               (int "steps" 20 1 10000 1) (float "cfg" 8.0 0.0 100.0 0.1)
-              (input "sampler_name" (combo '("euler" "euler_ancestral" "heun" "dpm_2" "dpmpp_2m")))
-              (input "scheduler" (combo '("normal" "karras" "exponential" "sgm_uniform")))
+              (input "sampler_name" (combo '("euler" "euler_ancestral" "dpmpp_2m")))
+              (input "scheduler" (combo '("normal" "karras" "simple")))
               (input "positive" (scalar "CONDITIONING" #f))
               (input "negative" (scalar "CONDITIONING" #f))
               (input "latent_image" (scalar "LATENT" #f))

@@ -13,6 +13,19 @@
    (list (cons "type" type) (cons "message" message)
          (cons "details" details) (cons "extra_info" extra))))
 
+(define (combo-error class inputs)
+  (and (string=? class "KSampler")
+       (find
+        (lambda (entry)
+          (let* ((field (car entry)) (value (cdr entry))
+                 (allowed (cond ((string=? field "sampler_name")
+                                 '("euler" "euler_ancestral" "dpmpp_2m"))
+                                ((string=? field "scheduler")
+                                 '("normal" "karras" "simple"))
+                                (else #f))))
+            (and allowed (not (member value allowed)) (cons field value))))
+        inputs)))
+
 (define (validate-prompt config prompt)
   (let* ((nodes (if (list? prompt) prompt '()))
          (registry (object-info config))
@@ -59,21 +72,31 @@
                         (missing (filter (lambda (input)
                                            (not (assoc (car input) inputs)))
                                          required)))
-                   (if (null? missing)
+                   (let ((bad-combo (combo-error class inputs)))
+                   (if (and (null? missing) (not bad-combo))
                        #f
                        (cons node-id
                              (make-json-object
                               (list
                                (cons "errors"
-                                     (map (lambda (input)
-                                            (make-error "required_input_missing"
-                                                        "Required input is missing"
-                                                        (car input)
-                                                        (make-json-object
-                                                         (list (cons "input_name" (car input))))))
-                                          missing))
+                                     (append
+                                      (map (lambda (input)
+                                             (make-error "required_input_missing"
+                                                         "Required input is missing"
+                                                         (car input)
+                                                         (make-json-object
+                                                          (list (cons "input_name" (car input))))))
+                                           missing)
+                                      (if bad-combo
+                                          (list (make-error "value_not_in_list"
+                                                            "Value not in list"
+                                                            (cdr bad-combo)
+                                                            (make-json-object
+                                                             (list (cons "input_name"
+                                                                         (car bad-combo))))))
+                                          '())))
                                (cons "dependent_outputs" '())
-                               (cons "class_type" class))))))))))
+                               (cons "class_type" class)))))))))))
            nodes))
          (has-output
           (any (lambda (entry)
