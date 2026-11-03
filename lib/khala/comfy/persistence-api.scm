@@ -7,6 +7,7 @@
       (config-ref config 'persist_queue)))
 
 (define (persistence-call config procedure . args)
-  (when (persistence-active? config)
-    (let ((target (module-ref (resolve-interface '(khala comfy persistence)) procedure)))
-      (apply target config args))))
+  (if (persistence-active? config)
+      (let ((target (module-ref (resolve-interface '(khala comfy persistence)) procedure)))
+        (apply target config args))
+      #f))
