@@ -16,7 +16,11 @@
     (history_db . "var/history.sqlite3")
     (extra_model_paths . "")
     (mirror . "auto")
-    (download_threads . 4)))
+    (download_threads . 4)
+    (download_chunk_mib . 64)
+    (mirror_probe_bytes . 4194304)
+    (mirror_probe_timeout . 8)
+    (mirror_cache_minutes . 30)))
 
 (define (config-key text)
   (string->symbol (string-trim-both text)))
@@ -24,7 +28,9 @@
 (define (parse-value key text)
   (let ((value (string-trim-both text)))
     (cond
-     ((member key '(port download_threads)) (or (string->number value) 0))
+     ((member key '(port download_threads download_chunk_mib mirror_probe_bytes
+                         mirror_probe_timeout mirror_cache_minutes))
+      (or (string->number value) 0))
      ((member key '(persist_history persist_queue))
       (and (member value '("yes" "true" "on")) #t))
      (else value))))
