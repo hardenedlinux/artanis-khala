@@ -8,10 +8,10 @@
  ;; Put whatever you want to be called before server initilization here
 
  (init-server #:statics '(png gif jpg jpeg ico html js json csv xml css woff woff2 ttf))
+ (add-to-load-path (current-toplevel))
  (add-to-load-path (string-append (current-toplevel) "/lib"))
- (use-modules (khala config) (khala comfy routes) (khala comfy worker) (khala ollama))
- (define khala-config (load-config))
- (register-routes! khala-config)
+ (use-modules (app models comfy) (khala ollama))
+ (define khala-config (comfy-config))
  (register-ollama-routes! khala-config)
- (restore-persisted-queue! khala-config)
- (start-worker! khala-config)
+ (comfy-restore-queue! khala-config)
+ (comfy-start-worker! khala-config)
