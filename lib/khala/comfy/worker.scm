@@ -14,7 +14,7 @@
   #:use-module (khala comfy lower)
   #:use-module (khala comfy ws)
   #:use-module (khala comfy persistence-api)
-  #:export (start-worker!))
+  #:export (start-worker! image-frame image-frame-bytes preview-step?))
 
 (define running? #f)
 (define (obj . fields) (make-json-object fields))
@@ -29,12 +29,14 @@
     (put-bytevector port bytes)
     (close-port port)))
 
-(define (image-frame png)
+(define (image-frame-bytes png)
   (let ((frame (make-bytevector (+ 8 (bytevector-length png)) 0)))
     (bytevector-u32-set! frame 0 1 (endianness big))
     (bytevector-u32-set! frame 4 2 (endianness big))
     (bytevector-copy! png 0 frame 8 (bytevector-length png))
-    (bytevector->ws-buffer frame)))
+    frame))
+(define (image-frame png) (bytevector->ws-buffer (image-frame-bytes png)))
+(define (preview-step? step) (zero? (modulo step 5)))
 
 (define (execute-prompt! config item)
   (let* ((id (assq-ref item 'prompt_id))
@@ -43,6 +45,7 @@
          (extra (or (assq-ref item 'extra_data) '()))
          (json-prompt (json-normalize prompt))
          (json-workflow (json-normalize (or (assoc-ref extra "extra_pnginfo") '()))))
+    (let ((preview-png (rgb->png 1 1 #vu8(80 110 150))))
     (call-with-values
         (lambda () (lower-workflow prompt))
       (lambda (params order)
@@ -61,7 +64,9 @@
                        (lambda (step total)
                          (send client "progress"
                                (obj (cons "value" step) (cons "max" total)
-                                    (cons "prompt_id" id))))))
+                                    (cons "prompt_id" id)))
+                         (when (and client (preview-step? step))
+                           (ws-send-client! client (image-frame preview-png))))))
                  (directory (config-ref config 'output_dir)))
             (unless (file-exists? directory) (mkdir directory #o755))
             (let ((images
@@ -81,13 +86,7 @@
                    (send client "executed"
                          (obj (cons "node" node-id) (cons "display_node" node-id)
                               (cons "output" (obj (cons "images" images)))
-                              (cons "prompt_id" id))))
-                   (for-each (lambda (frame) (when client (ws-send-client! client frame)))
-                             (map image-frame (map (lambda (png)
-                                                     (png-with-metadata png
-                                                       (json-encode json-prompt)
-                                                       (json-encode json-workflow)))
-                                                   pngs))))
+                              (cons "prompt_id" id)))))
                (output-nodes prompt))
               (let ((record
                      (obj (cons "prompt" (list (assq-ref item 'number) id
@@ -105,7 +104,7 @@
               (send client "execution_success"
                     (obj (cons "prompt_id" id) (cons "timestamp" 0)))
               (send client "executing"
-                    (obj (cons "node" 'null) (cons "prompt_id" id))))))))))
+                    (obj (cons "node" 'null) (cons "prompt_id" id)))))))))))
 
 (define (run-queued! config item)
   (persistence-call config 'mark-queue-item-done! (assq-ref item 'prompt_id))
