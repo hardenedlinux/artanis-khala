@@ -154,43 +154,24 @@
                               (cons "output" (obj (cons "images" images)))
                               (cons "prompt_id" id)))))
                (output-nodes prompt))
-              (format (current-error-port) "Khala prompt ~a: output events sent~%" id)
               (let* ((prompt-field
-                      (begin
-                        (format (current-error-port) "Khala prompt ~a: history prompt field~%" id)
-                        (cons "prompt" (list (assq-ref item 'number) id
-                                             json-prompt (json-normalize extra)))))
+                      (cons "prompt" (list (assq-ref item 'number) id
+                                           json-prompt (json-normalize extra))))
                      (save-nodes
-                      (begin
-                        (format (current-error-port) "Khala prompt ~a: history save nodes~%" id)
-                        (filter (lambda (node)
-                                  (equal? "SaveImage" (node-class node)))
-                                (output-nodes prompt))))
+                      (filter (lambda (node)
+                                (equal? "SaveImage" (node-class node)))
+                              (output-nodes prompt)))
                      (output-fields
-                      (begin
-                        (format (current-error-port) "Khala prompt ~a: history output fields~%" id)
-                        (map (lambda (output)
-                               (cons (car output) (obj (cons "images" images))))
-                             save-nodes)))
-                     (outputs-field
-                      (begin
-                        (format (current-error-port) "Khala prompt ~a: history outputs field~%" id)
-                        (cons "outputs" (make-json-object output-fields))))
-                     (status-field
-                      (begin
-                        (format (current-error-port) "Khala prompt ~a: history status field~%" id)
-                        (cons "status" (obj (cons "completed" #t)))))
-                     (record
-                      (begin
-                        (format (current-error-port) "Khala prompt ~a: history object~%" id)
-                        (obj prompt-field outputs-field status-field))))
-                (format (current-error-port) "Khala prompt ~a: history record built~%" id)
+                      (map (lambda (output)
+                             (cons (car output) (obj (cons "images" images))))
+                           save-nodes))
+                     (outputs-field (cons "outputs" (make-json-object output-fields)))
+                     (status-field (cons "status" (obj (cons "completed" #t))))
+                     (record (obj prompt-field outputs-field status-field)))
                 (history-add! id record)
-                (format (current-error-port) "Khala prompt ~a: history added~%" id)
                 (persistence-call config 'save-history! id record))
               (send client "execution_success"
                     (obj (cons "prompt_id" id) (cons "timestamp" 0)))
-              (format (current-error-port) "Khala prompt ~a: success sent~%" id)
               (set! last-successful-fingerprints fingerprints)
               (set! last-successful-pngs pngs)
               (send client "executing"
