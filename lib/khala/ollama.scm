@@ -10,6 +10,7 @@
   #:use-module (json)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-13)
+  #:use-module (srfi srfi-34)
   #:use-module (khala json)
   #:use-module (khala config)
   #:use-module (khala download)
@@ -190,20 +191,25 @@
           (response-emit-stream
            (lambda (send)
              (let ((job (start-download-job (cdr entry) (llm-dir config))))
-               (let loop ()
-                 (let* ((st (job-status job)) (state (assq-ref st 'state))
-                        (done (or (assq-ref st 'bytes-done) 0))
-                        (total (or (assq-ref st 'bytes-total) 0)))
-                   (cond
-                    ((equal? state "done")
-                     (write-line send (obj (cons "status" "success"))))
-                    ((member state '("failed" "cancelled"))
-                     (write-line send (error-json (or (assq-ref st 'error) state))))
-                    (else
-                     (write-line send (obj (cons "status" "pulling model")
-                                           (cons "digest" "")
-                                           (cons "total" total) (cons "completed" done)))
-                     (usleep 100000)
-                     (loop)))))))
+               (guard (ex
+                       (#t
+                        ;; A failed stream write means the client disconnected.
+                        (cancel-job! job)
+                        #t))
+                 (let loop ()
+                   (let* ((st (job-status job)) (state (assq-ref st 'state))
+                          (done (or (assq-ref st 'bytes-done) 0))
+                          (total (or (assq-ref st 'bytes-total) 0)))
+                     (cond
+                      ((equal? state "done")
+                       (write-line send (obj (cons "status" "success"))))
+                      ((member state '("failed" "cancelled"))
+                       (write-line send (error-json (or (assq-ref st 'error) state))))
+                      (else
+                       (write-line send (obj (cons "status" "pulling model")
+                                             (cons "digest" "")
+                                             (cons "total" total) (cons "completed" done)))
+                       (usleep 100000)
+                       (loop))))))))
            #:headers '((content-type . (application/x-ndjson))))))))
   #t)
