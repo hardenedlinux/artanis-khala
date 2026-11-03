@@ -17,10 +17,25 @@
   #:export (start-worker! image-frame image-frame-bytes preview-step?))
 
 (define running? #f)
+(define last-successful-prompt #f)
+(define last-successful-pngs '())
 (define (obj . fields) (make-json-object fields))
+(define (broadcast-queue-status!)
+  (ws-broadcast!
+   (obj (cons "type" "status")
+        (cons "data"
+              (obj (cons "status"
+                         (obj (cons "exec_info"
+                                    (obj (cons "queue_remaining"
+                                               (+ (length (queue-list))
+                                                  (if (queue-current) 1 0))))))))))))
 (define (send client type data)
   (when client (ws-send-client! client (obj (cons "type" type) (cons "data" data)))))
 (define (node-class node) (assoc-ref (cdr node) "class_type"))
+(define (send-executing! client node-id id)
+  (send client "executing"
+        (obj (cons "node" node-id) (cons "display_node" node-id)
+             (cons "prompt_id" id))))
 (define (output-nodes prompt)
   (filter (lambda (node) (member (node-class node) '("SaveImage" "PreviewImage"))) prompt))
 
@@ -44,30 +59,49 @@
          (prompt (assq-ref item 'prompt))
          (extra (or (assq-ref item 'extra_data) '()))
          (json-prompt (json-normalize prompt))
+         (cache-key (list json-prompt (assoc-ref extra "fail_at_step")))
          (json-workflow (json-normalize (or (assoc-ref extra "extra_pnginfo") '()))))
     (let ((preview-png (rgb->png 1 1 #vu8(80 110 150))))
     (call-with-values
         (lambda () (lower-workflow prompt))
       (lambda (params order)
         (send client "execution_start" (obj (cons "prompt_id" id) (cons "timestamp" 0)))
+        (when (equal? cache-key last-successful-prompt)
+          (send client "execution_cached"
+                (obj (cons "prompt_id" id) (cons "nodes" order) (cons "timestamp" 0))))
         (when (and params order)
-          (for-each
-           (lambda (node-id)
-             (send client "executing"
-                   (obj (cons "node" node-id) (cons "display_node" node-id)
-                        (cons "prompt_id" id))))
-           order)
+          (let* ((sampler (find (lambda (node) (equal? "KSampler" (node-class node)))
+                                prompt))
+                 (sampler-id (and sampler (car sampler)))
+                 (params (if (assoc-ref extra "fail_at_step")
+                             (acons 'fail_at_step (assoc-ref extra "fail_at_step") params)
+                             params))
+                 (before (if sampler-id (take-while (lambda (node-id)
+                                                     (not (equal? node-id sampler-id))) order)
+                             order))
+                 (after (if sampler-id (drop-while (lambda (node-id)
+                                                    (not (equal? node-id sampler-id))) order)
+                            '())))
+          (unless (equal? cache-key last-successful-prompt)
+            (for-each (lambda (node-id) (send-executing! client node-id id)) before)
+            (when sampler-id (send-executing! client sampler-id id)))
           (let* ((engine-name (string->symbol (config-ref config 'engine)))
-                 (pngs (engine-run-t2i params #:engine engine-name
+                 (pngs (if (equal? cache-key last-successful-prompt)
+                           last-successful-pngs
+                           (engine-run-t2i params #:engine engine-name
                        #:cancelled? queue-interrupted?
                        #:on-progress
                        (lambda (step total)
                          (send client "progress"
                                (obj (cons "value" step) (cons "max" total)
                                     (cons "prompt_id" id)))
-                         (when (and client (preview-step? step))
-                           (ws-send-client! client (image-frame preview-png))))))
+                         (when (and client sampler-id (preview-step? step))
+                           (ws-send-client! client (image-frame preview-png)))))))
                  (directory (config-ref config 'output_dir)))
+            (when (queue-interrupted?) (throw 'khala-interrupted id))
+            (unless (equal? cache-key last-successful-prompt)
+              (for-each (lambda (node-id) (send-executing! client node-id id))
+                        (if sampler-id (cdr after) '())))
             (unless (file-exists? directory) (mkdir directory #o755))
             (let ((images
                    (map (lambda (png index)
@@ -103,8 +137,36 @@
                 (persistence-call config 'save-history! id record))
               (send client "execution_success"
                     (obj (cons "prompt_id" id) (cons "timestamp" 0)))
+              (set! last-successful-prompt cache-key)
+              (set! last-successful-pngs pngs)
               (send client "executing"
-                    (obj (cons "node" 'null) (cons "prompt_id" id)))))))))))
+                    (obj (cons "node" 'null) (cons "prompt_id" id))))))))))))
+
+(define (handle-prompt-error! item key args)
+  (let* ((prompt (assq-ref item 'prompt))
+         (sampler (find (lambda (node) (equal? "KSampler" (node-class node))) prompt))
+         (id (assq-ref item 'prompt_id)))
+    (if (eq? key 'khala-interrupted)
+        (ws-broadcast!
+         (obj (cons "type" "execution_interrupted")
+              (cons "data"
+                    (obj (cons "prompt_id" id)
+                         (cons "node_id" (if sampler (car sampler) 'null))
+                         (cons "node_type" (if sampler "KSampler" 'null))
+                         (cons "executed" '()) (cons "timestamp" 0)))))
+        (begin
+          (format (current-error-port) "Khala prompt ~a failed: ~s ~s~%" id key args)
+          (send (assq-ref item 'client_id) "execution_error"
+                (obj (cons "prompt_id" id)
+                     (cons "node_id" (if sampler (car sampler) 'null))
+                     (cons "node_type" (if sampler "KSampler" 'null))
+                     (cons "executed" '())
+                     (cons "exception_message" (format #f "~s" args))
+                     (cons "exception_type" "Error")
+                     (cons "traceback" '())
+                     (cons "current_inputs" '())
+                     (cons "current_outputs" '())
+                     (cons "timestamp" 0)))))))
 
 (define (run-queued! config item)
   (persistence-call config 'mark-queue-item-done! (assq-ref item 'prompt_id))
@@ -114,13 +176,9 @@
     (lambda ()
       (catch #t
         (lambda () (execute-prompt! config item))
-        (lambda (key . args)
-          (format (current-error-port) "Khala prompt ~a failed: ~s ~s~%"
-                  (assq-ref item 'prompt_id) key args)
-          (send (assq-ref item 'client_id) "execution_error"
-                (obj (cons "prompt_id" (assq-ref item 'prompt_id))
-                     (cons "exception_message" (format #f "~s" args)))))))
-    queue-finish!))
+        (lambda (key . args) (handle-prompt-error! item key args))))
+    queue-finish!)
+  (broadcast-queue-status!))
 
 (define (start-worker! config)
   (unless running?

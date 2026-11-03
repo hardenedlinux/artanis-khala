@@ -10,6 +10,7 @@
     (input_dir . "input")
     (output_dir . "output")
     (temp_dir . "temp")
+    (user_dir . "var/user/default")
     (engine . "fake")
     (persist_history . #f)
     (persist_queue . #f)

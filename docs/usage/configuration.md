@@ -9,6 +9,7 @@ Khala reads `conf/khala.conf`. Values use `key = value`; blank lines and `#` com
 | `input_dir` | `input` | Uploaded inputs and LoadImage files. |
 | `output_dir` | `output` | Generated images. |
 | `temp_dir` | `temp` | Temporary images and previews. |
+| `user_dir` | `var/user/default` | Per-user settings and userdata storage. |
 | `engine` | `fake` | `fake` or `sonicboom` image engine. |
 | `persist_history` | `no` | Persist history when `yes`. |
 | `persist_queue` | `no` | Restore pending prompts when `yes`. |
