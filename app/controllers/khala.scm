@@ -6,6 +6,7 @@
              (artanis route)
              (ice-9 optargs)
              (json)
+             (rnrs io ports)
              (srfi srfi-1)
              (app models khala)
              (khala config)
@@ -27,15 +28,35 @@
 (define config (load-config))
 
 (define (asset-type path)
-  (cond ((string-suffix? ".js" path) '(application/javascript))
+  (cond ((string-suffix? ".js" path) '(text/javascript))
         ((string-suffix? ".css" path) '(text/css))
         ((string-suffix? ".svg" path) '(image/svg+xml))
         ((string-suffix? ".png" path) '(image/png))
+        ((string-suffix? ".woff2" path) '(font/woff2))
+        ((string-suffix? ".json" path) '(application/json))
+        ((string-suffix? ".html" path) '(text/html (charset . "utf-8")))
         (else '(application/octet-stream))))
 
 (define (serve-file path)
   (response-emit (call-with-input-file path get-bytevector-all)
                  #:headers `((content-type . ,(asset-type path)))))
+
+(define (ui-static-path request-path)
+  (let* ((prefix "/khala/")
+         (relative (and (string-prefix? prefix request-path)
+                        (substring request-path (string-length prefix))))
+         (root (canonicalize-path "ui/dist"))
+         (candidate (and relative
+                         (not (member ".." (string-split relative #\/)))
+                         (string-append root "/" relative)))
+         (resolved (and candidate
+                        (file-exists? candidate)
+                        (canonicalize-path candidate)))
+         (root-prefix (string-append root "/")))
+    (and resolved
+         (string-prefix? root-prefix resolved)
+         (not (file-is-directory? resolved))
+         resolved)))
 
 (define (missing-ui-page rc)
   (let ((accept (or (get-header rc 'accept-language) "en")))
@@ -90,10 +111,11 @@
      (lambda (rc)
        (reply-json (khala-save-settings! (load-config) (body-json rc)))))
 (get "/khala" (lambda (rc) (serve-ui rc)))
-(get "/khala/:path" (lambda (rc) (serve-ui rc)))
-(get "/khala/assets/:asset"
+(get "/khala/(models|history|chat|settings)"
+     (lambda (rc) (serve-ui rc)))
+(get "/khala/(assets/[^/]+|favicon.svg|icons.svg)"
      (lambda (rc)
-       (let ((path (string-append "ui/dist/assets/" (params rc "asset"))))
-         (if (file-exists? path)
+       (let ((path (ui-static-path (rc-path rc))))
+         (if path
              (serve-file path)
              (response-emit "Not found" #:status 404)))))

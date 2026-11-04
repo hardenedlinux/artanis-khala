@@ -48,7 +48,7 @@
   "chat.messagePlaceholder": "メッセージを入力",
   "chat.send": "送信",
   "chat.empty": "会話を始めましょう。",
-  "settings.title": "設定",
+  "settings.title": "構成",
   "settings.language": "言語",
   "settings.mirror": "モデルミラー",
   "settings.downloadThreads": "ダウンロードスレッド数",
