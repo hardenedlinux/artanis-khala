@@ -31,15 +31,34 @@
                       (list `(("role" . "user")
                               ("content" . ,(or (and req (assoc-ref req "prompt")) ""))))))
          (stream? (not (and req (eq? #f (assoc-ref req "stream")))))
-         (cancel? (make-parameter #f)))
-    (if (string-null? model)
-        (response-emit (json-encode (error-json "model is required")) #:status 400)
+         (cancel? (make-parameter #f))
+         (sonicboom?
+          (equal? (config-ref config 'engine) "sonicboom"))
+         (sonicboom-available?
+          (and sonicboom?
+               (catch #t
+                 (lambda () (resolve-interface '(khala engine llm-sonicboom)) #t)
+                 (lambda _ #f))))
+         (engine-module
+          (if (equal? (config-ref config 'engine) "sonicboom")
+              '(khala engine llm-sonicboom)
+              '(khala engine llm-fake))))
+    (cond
+     ((and sonicboom? (not sonicboom-available?))
+      (response-emit
+       (json-encode
+        (obj (cons "error"
+                   "SonicBoom engine not available: required Guile modules could not be loaded")))
+       #:status 503 #:headers '((content-type . (application/json)))))
+     ((string-null? model)
+        (response-emit (json-encode (error-json "model is required")) #:status 400))
+     (else
         (let ((producer
                (lambda (send)
                  (catch #t
                    (lambda ()
                      (let ((result
-                            ((module-ref (resolve-interface '(khala engine llm-fake)) 'engine-chat)
+                            ((module-ref (resolve-interface engine-module) 'engine-chat)
                              model messages (or (and req (assoc-ref req "options")) (obj))
                              #:cancelled? (lambda () (cancel?))
                              #:on-token
@@ -94,6 +113,7 @@
                                                                               (assoc-ref result 'eval_count))))))))
                           (else (write-line send final))))))
                    (lambda (key . args)
+                     (when (eq? key 'artanis-err) (apply throw key args))
                      (format (current-error-port) "Khala fake LLM request failed: ~s ~s~%" key args)
                      (cancel? #t))))))
           (if stream?
@@ -107,7 +127,7 @@
                 (let* ((lines (filter (lambda (x) (not (string-null? x)))
                                       (string-split (get-output-string out) #\newline)))
                        (last-line (if (null? lines) "{}" (last lines))))
-                  (response-emit last-line #:headers '((content-type . (application/json)))))))))))
+                  (response-emit last-line #:headers '((content-type . (application/json))))))))))))
 
 (define (register-ollama-routes! config)
   (get "/api/version" (lambda _ (emit-json (obj (cons "version" "0.1.0")))))
