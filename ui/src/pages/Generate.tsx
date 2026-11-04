@@ -25,12 +25,17 @@ export function GeneratePage() {
   const [height, setHeight] = useState(512);
   const [steps, setSteps] = useState(20);
   const [seed, setSeed] = useState(1);
+  const [enhancedPrompt, setEnhancedPrompt] = useState("");
+  const [negative, setNegative] = useState("");
+  const [enhancing, setEnhancing] = useState(false);
   const [ws, setWs] = useState<WsState>(initialWsState);
   const [image, setImage] = useState<string | null>(null);
   const [error, setError] = useState("");
   const clientId = useMemo(() => crypto.randomUUID(), []);
 
-  useEffect(() => { if (!model && checkpoints[0]) setModel(checkpoints[0]); }, [checkpoints, model]);
+  useEffect(() => {
+    if (!model) setModel(checkpoints[0] ?? "e2e.safetensors");
+  }, [checkpoints, model]);
   useEffect(() => {
     const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?clientId=${clientId}`);
     socket.binaryType = "arraybuffer";
@@ -48,7 +53,9 @@ export function GeneratePage() {
   async function generate() {
     setError("");
     try {
-      const result = await api.queuePrompt(buildPrompt({ prompt, model, width, height, steps, seed }), clientId);
+      const result = await api.queuePrompt(buildPrompt({
+        prompt: enhancedPrompt || prompt, negative, model, width, height, steps, seed,
+      }), clientId);
       setWs({ ...initialWsState, promptId: result.prompt_id });
       window.setTimeout(async () => {
         const history = await api.history();
@@ -70,6 +77,26 @@ export function GeneratePage() {
             <SelectContent>{checkpoints.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
           </Select>
           <Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={t("generate.promptPlaceholder")} />
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!prompt || enhancing}
+            onClick={() => {
+              setEnhancing(true);
+              void api.enhance(prompt, "").then((value) => {
+                setEnhancedPrompt(value.prompt);
+                setNegative(value.negative);
+              }).finally(() => setEnhancing(false));
+            }}
+          >
+            {t("generate.enhance")}
+          </Button>
+          <label className="block text-sm">{t("generate.enhancedPrompt")}
+            <Textarea value={enhancedPrompt} onChange={(event) => setEnhancedPrompt(event.target.value)} />
+          </label>
+          <label className="block text-sm">{t("generate.negative")}
+            <Textarea value={negative} onChange={(event) => setNegative(event.target.value)} />
+          </label>
           <div className="grid grid-cols-2 gap-3">
             <Input type="number" value={width} onChange={(event) => setWidth(Number(event.target.value))} aria-label={t("generate.width")} />
             <Input type="number" value={height} onChange={(event) => setHeight(Number(event.target.value))} aria-label={t("generate.height")} />

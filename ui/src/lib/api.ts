@@ -18,6 +18,7 @@ export interface DownloadStatus {
 export interface KhalaSettings {
   mirror: string;
   download_threads: number;
+  enhance_model?: string;
 }
 
 export interface SystemInfo {
@@ -93,6 +94,11 @@ export const api = {
     request<KhalaSettings>("/khala/api/settings", {
       method: "PUT",
       body: JSON.stringify(settings),
+    }),
+  enhance: (text: string, model: string) =>
+    request<{ prompt: string; negative: string; model: string }>("/khala/api/enhance", {
+      method: "POST",
+      body: JSON.stringify({ text, model }),
     }),
   objectInfo: () => request<Record<string, ComfyNodeInfo>>("/object_info"),
   history: () => request<Record<string, HistoryEntry>>("/history"),

@@ -19,6 +19,8 @@ test.afterAll(() => {
 test("generate, install, cancel, and switch language", async ({ page }) => {
   await page.goto("./");
   await page.getByPlaceholder("Describe the image you want to create").fill("e2e lake");
+  await page.getByRole("button", { name: "Enhance prompt" }).click();
+  await expect(page.getByLabel("Enhanced prompt")).toContainText("Detailed image");
   await page.getByRole("button", { name: "Generate" }).click();
   await expect(page.getByText(/Generating:/)).toBeVisible();
   await expect(page.getByRole("img", { name: "Result" })).toBeVisible({ timeout: 20_000 });

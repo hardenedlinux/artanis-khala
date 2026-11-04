@@ -7,13 +7,14 @@ export interface GenerateOptions {
   height: number;
   steps: number;
   seed: number;
+  negative?: string;
 }
 
 export function buildPrompt(options: GenerateOptions): Record<string, ComfyNode> {
   return {
     "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: options.model } },
     "2": { class_type: "CLIPTextEncode", inputs: { text: options.prompt, clip: ["1", 1] } },
-    "3": { class_type: "CLIPTextEncode", inputs: { text: "", clip: ["1", 1] } },
+    "3": { class_type: "CLIPTextEncode", inputs: { text: options.negative ?? "", clip: ["1", 1] } },
     "4": {
       class_type: "EmptyLatentImage",
       inputs: { width: options.width, height: options.height, batch_size: 1 },

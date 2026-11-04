@@ -12,6 +12,7 @@
     (temp_dir . "temp")
     (user_dir . "var/user/default")
     (engine . "fake")
+    (enhance_model . "")
     (persist_history . #f)
     (persist_queue . #f)
     (history_db . "var/history.sqlite3")

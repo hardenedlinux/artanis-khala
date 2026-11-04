@@ -8,6 +8,7 @@
   #:use-module (ice-9 threads)
   #:use-module (json)
   #:use-module (rnrs io ports)
+  #:use-module (rnrs bytevectors)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-9)
   #:use-module (srfi srfi-13)
@@ -15,6 +16,8 @@
   #:use-module (khala config)
   #:use-module (khala json)
   #:export (start-download-job job-status cancel-job! set-download-config!
+            list-repo-files start-directory-job directory-job-status
+            cancel-directory-job! directory-job?
             download-range-to-fd download-head-size))
 
 (define download-config (load-config))
@@ -67,6 +70,7 @@
 
 (define (source-url source path)
   (let* ((kind (sym (car source))) (spec (cdr source))
+         (path (or path ""))
          (repo (or (ref spec 'repo) ""))
          (rev (or (ref spec 'revision) "main"))
          (base (or (ref spec 'base_url)
@@ -74,15 +78,184 @@
                         (config-ref download-config
                           (string->symbol (string-append "custom_mirror." (name kind))))))))
     (case kind
-      ((huggingface) (format #f "https://huggingface.co/~a/resolve/~a/~a" repo rev path))
-      ((hf-mirror) (format #f "https://hf-mirror.com/~a/resolve/~a/~a" repo rev path))
-      ((modelscope) (format #f "https://www.modelscope.cn/models/~a/resolve/~a/~a" repo rev path))
+      ((huggingface) (string-append (trim-slashes (or base "https://huggingface.co"))
+                                    "/" repo "/resolve/" rev "/" path))
+      ((hf-mirror) (string-append (trim-slashes (or base "https://hf-mirror.com"))
+                                  "/" repo "/resolve/" rev "/" path))
+      ((modelscope) (string-append (trim-slashes (or base "https://www.modelscope.cn"))
+                                   "/models/" repo "/resolve/" rev "/" path))
       ((url)
        (unless base (error "url source requires base_url" spec))
        (string-append (trim-slashes base) "/"
                       (if (string-null? repo) path
                           (string-append repo "/resolve/" rev "/" path))))
       (else (and base (string-append (trim-slashes base) "/" repo "/resolve/" rev "/" path))))))
+
+(define (api-base source default)
+  (let ((spec (cdr source)))
+    (trim-slashes (or (ref spec 'base_url) default))))
+
+(define (json-field object key)
+  (let ((entry (and (list? object) (assoc key object))))
+    (and entry (cdr entry))))
+
+(define (http-json url)
+  (let ((handle (curl-easy-init)))
+    (dynamic-wind
+      (lambda () (curl-options! handle url))
+      (lambda ()
+        (let ((body (curl-easy-perform handle #t))
+              (code (curl-easy-getinfo handle 'response-code)))
+          (unless (and (eqv? code 200) (bytevector? body))
+            (error "repository listing failed" url code))
+          (json-string->scm (utf8->string body))))
+      (lambda () (curl-easy-cleanup handle)))))
+
+(define (list-repo-files source repo revision)
+  (let* ((kind (sym (car source)))
+         (encoded
+          (case kind
+            ((huggingface hf-mirror)
+             (string-append
+              (api-base source
+                        (if (eq? kind 'hf-mirror)
+                            "https://hf-mirror.com"
+                            "https://huggingface.co"))
+              "/api/models/" repo "/tree/" revision "?recursive=true"))
+            ((modelscope)
+             (string-append
+              (api-base source "https://www.modelscope.cn")
+              "/api/v1/models/" repo "/repo/files?Revision=" revision
+              "&Recursive=true"))
+            (else (error "unsupported repository listing source" kind))))
+         (payload (http-json encoded)))
+    (case kind
+      ((huggingface hf-mirror)
+       (filter-map
+        (lambda (item)
+          (and (equal? (json-field item "type") "file")
+               (let* ((lfs (json-field item "lfs"))
+                      (sha (and lfs (json-field lfs "oid"))))
+                 (list (json-field item "path")
+                       (json-field item "size") sha))))
+        (if (vector? payload) (vector->list payload) payload)))
+      ((modelscope)
+       (let* ((data (json-field payload "Data"))
+              (files (json-field data "Files")))
+         (filter-map
+          (lambda (item)
+            (and (equal? (json-field item "Type") "blob")
+                 (list (json-field item "Path")
+                       (json-field item "Size")
+                       (json-field item "Sha256"))))
+          (if (vector? files) (vector->list files) files)))))))
+
+(define-record-type <directory-job>
+  (make-directory-job entry final part state error files-done files-total
+                      bytes-done bytes-total children cancelled lock thread)
+  directory-job?
+  (entry directory-job-entry) (final directory-job-final)
+  (part directory-job-part) (state directory-job-state set-directory-job-state!)
+  (error directory-job-error set-directory-job-error!)
+  (files-done directory-job-files-done set-directory-job-files-done!)
+  (files-total directory-job-files-total set-directory-job-files-total!)
+  (bytes-done directory-job-bytes-done set-directory-job-bytes-done!)
+  (bytes-total directory-job-bytes-total set-directory-job-bytes-total!)
+  (children directory-job-children set-directory-job-children!)
+  (cancelled directory-job-cancelled set-directory-job-cancelled!)
+  (lock directory-job-lock) (thread directory-job-thread set-directory-job-thread!))
+
+(define (directory-job-status job)
+  (with-mutex (directory-job-lock job)
+    (let ((children (directory-job-children job)))
+      (set-directory-job-bytes-done!
+       job (fold (lambda (child total)
+                   (+ total (or (ref (job-status child) 'bytes-done) 0)))
+                 0 children))
+      `((state . ,(directory-job-state job))
+        (bytes-done . ,(directory-job-bytes-done job))
+        (bytes-total . ,(directory-job-bytes-total job))
+        (files-done . ,(directory-job-files-done job))
+        (files-total . ,(directory-job-files-total job))
+        (error . ,(directory-job-error job))))))
+
+(define (cancel-directory-job! job)
+  (with-mutex (directory-job-lock job)
+    (set-directory-job-cancelled! job #t)
+    (set-directory-job-state! job "cancelled")
+    (for-each cancel-job! (directory-job-children job)))
+  #t)
+
+(define (run-directory-job! job sources)
+  (guard (ex
+          (#t
+           (set-directory-job-error! job (exception-text ex))
+           (set-directory-job-state!
+            job (if (directory-job-cancelled job) "cancelled" "failed"))))
+    (set-directory-job-state! job "listing")
+    (let* ((listed
+            (let loop ((left sources))
+              (if (null? left)
+                  (error "all repository listings failed")
+                  (guard (ex (#t
+                              (format (current-error-port)
+                                      "directory listing failed for ~s: ~s~%"
+                                      (car (car left)) ex)
+                              (loop (cdr left))))
+                    (let* ((source (car left))
+                           (original (cons (ref source 'name) (ref source 'spec)))
+                           (repo (ref (ref source 'spec) 'repo))
+                           (revision (or (ref (ref source 'spec) 'revision) "main")))
+                      (cons original
+                            (list-repo-files original repo revision)))))))
+           (chosen (car listed))
+           (files (cdr listed)))
+    (set-directory-job-files-total! job (length files))
+    (set-directory-job-bytes-total! job
+      (fold (lambda (file total) (+ total (or (cadr file) 0))) 0 files))
+    (set-directory-job-state! job "downloading")
+    (for-each
+     (lambda (file)
+       (when (directory-job-cancelled job)
+         (throw 'directory-cancelled file))
+       (let* ((path (car file)) (size (cadr file)) (sha (caddr file))
+              (entry `((path . ,path) (size . ,size)
+                       (sha256 . ,(or sha ""))
+                       (sources . (,chosen))))
+              (child (start-download-job entry (directory-job-part job))))
+         (with-mutex (directory-job-lock job)
+           (set-directory-job-children!
+            job (append (directory-job-children job) (list child))))
+         (let loop ()
+           (let* ((status (job-status child))
+                  (state (ref status 'state)))
+             (cond ((equal? state "done")
+                    (set-directory-job-files-done!
+                     job (+ 1 (directory-job-files-done job))))
+                   ((member state '("failed" "cancelled"))
+                    (error "directory file failed" path status))
+                   (else (usleep 100000) (loop)))))))
+     files)
+    (when (file-exists? (directory-job-final job))
+      (error "target directory already exists" (directory-job-final job)))
+    (rename-file (directory-job-part job) (directory-job-final job))
+    (set-directory-job-state! job "done"))))
+
+(define (start-directory-job catalog-entry models-root)
+  (let* ((folder (ref catalog-entry 'folder))
+         (directory (ref catalog-entry 'directory))
+         (final (string-append (trim-slashes models-root) "/" folder "/" directory))
+         (part (string-append final ".khala-part"))
+         (sources (select-sources catalog-entry))
+         (job (make-directory-job catalog-entry final part "queued" #f 0 0 0 0
+                                  '() #f (make-mutex) #f)))
+    (unless (and folder directory (pair? sources))
+      (error "invalid directory catalog entry"))
+    (ensure-parent final)
+    (unless (file-exists? part) (mkdir part #o755))
+    (set-directory-job-thread!
+     job (call-with-new-thread (lambda () (run-directory-job! job sources))))
+    job))
 (define (catalog-sources entry)
   (let ((sources (or (ref entry 'sources) '())))
     (filter-map

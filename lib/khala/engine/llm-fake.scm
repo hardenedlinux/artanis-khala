@@ -1,6 +1,7 @@
 (define-module (khala engine llm-fake)
   #:use-module (ice-9 format)
   #:use-module (ice-9 threads)
+  #:use-module (json)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-13)
   #:export (engine-chat))
@@ -14,7 +15,20 @@
 
 (define* (engine-chat model messages options #:key (on-token (lambda (_) #t))
                       (cancelled? (lambda () #f)))
-  (let* ((text (last-user-message messages))
+  (let* ((items (if (vector? messages) (vector->list messages) messages))
+         (enhance? (any (lambda (message)
+                          (and (equal? (assoc-ref message "role") "system")
+                               (string-contains (or (assoc-ref message "content") "")
+                                                "Rewrite the request")))
+                        items))
+         (text (last-user-message messages))
+         (text (if enhance?
+                   (scm->json-string
+                    `(("prompt" . ,(string-append
+                                    "Detailed image: " text
+                                    ", balanced composition, soft lighting, editorial style"))
+                      ("negative" . "blurry, low quality")))
+                   text))
          (words (string-split text #\space))
          (tokens (reverse words))
          (start (get-internal-real-time)))

@@ -10,7 +10,9 @@
              (srfi srfi-1)
              (app models khala)
              (khala config)
-             (khala json))
+             (khala comfy files)
+             (khala json)
+             (khala png))
 
 (define* (reply-json value #:optional (status 200))
   (response-emit (json-encode value) #:status status
@@ -105,11 +107,55 @@
      (lambda _ (reply-json (khala-catalog config))))
 (get "/khala/api/system"
      (lambda _ (reply-json (khala-system config))))
+(get "/khala/api/provenance"
+     (lambda (rc)
+       (let ((path (view-path config (params rc "filename")
+                              (or (params rc "subfolder") "")
+                              (or (params rc "type") "output"))))
+         (if path
+             (let ((text (png-read-text
+                          (call-with-input-file path get-bytevector-all) "khala")))
+               (if text
+                   (reply-json (json-string->scm text))
+                   (reply-json (obj (cons "error" "provenance not found")) 404)))
+             (reply-json (obj (cons "error" "image not found")) 404)))))
 (get "/khala/api/settings"
      (lambda _ (reply-json (khala-settings (load-config)))))
 (put "/khala/api/settings"
      (lambda (rc)
        (reply-json (khala-save-settings! (load-config) (body-json rc)))))
+(post "/khala/api/enhance"
+      (lambda (rc)
+        (let* ((body (body-json rc))
+               (text (assoc-ref body "text"))
+               (model (or (assoc-ref body "model")
+                          (config-ref config 'enhance_model)))
+               (system (call-with-input-file "conf/prompt-enhance.txt"
+                         get-string-all)))
+          (catch #t
+            (lambda ()
+              (let* ((engine (if (equal? (config-ref config 'engine) "sonicboom")
+                                 '(khala engine llm-sonicboom)
+                                 '(khala engine llm-fake)))
+                     (chat (module-ref (resolve-interface engine) 'engine-chat))
+                     (result (chat model
+                                   (list
+                                    `(("role" . "system") ("content" . ,system))
+                                    `(("role" . "user") ("content" . ,text)))
+                                   (list (cons "format" "json"))))
+                     (payload (json-string->scm (assoc-ref result 'text)))
+                     (prompt (assoc-ref payload "prompt"))
+                     (negative (assoc-ref payload "negative")))
+                (if (and (string? prompt) (string? negative))
+                    (reply-json (obj (cons "prompt" prompt)
+                                     (cons "negative" negative)
+                                     (cons "model" model)))
+                    (reply-json (obj (cons "error" "invalid enhancement JSON")) 502))))
+            (lambda (key . args)
+              (reply-json
+               (obj (cons "error"
+                          (format #f "prompt enhancement failed: ~a ~s" key args)))
+               502))))))
 (get "/khala" (lambda (rc) (serve-ui rc)))
 (get "/khala/(models|history|chat|settings)"
      (lambda (rc) (serve-ui rc)))
