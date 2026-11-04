@@ -17,7 +17,7 @@ test.afterAll(() => {
 });
 
 test("generate, install, cancel, and switch language", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("./");
   await page.getByPlaceholder("Describe the image you want to create").fill("e2e lake");
   await page.getByRole("button", { name: "Generate" }).click();
   await expect(page.getByText(/Generating:/)).toBeVisible();
