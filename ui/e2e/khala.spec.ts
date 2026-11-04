@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 
 const privateRoot = "/home/alexon/Project/khala-private";
-const runRoot = "/tmp/khala-run6";
+const runRoot = process.env.KHALA_RUN_DIR ?? "/tmp/khala-run7";
 
 test.beforeAll(() => {
   execFileSync(`${privateRoot}/tests/browser/e2e-start.sh`, [], {
