@@ -18,6 +18,8 @@
   (response-emit (json-encode value) #:status status
                  #:headers '((content-type . (application/json)))))
 
+(define (obj . fields) (make-json-object fields))
+
 (define (body-json rc)
   (let ((body (rc-body rc)))
     (if body (json-string->scm (utf8->string body))
