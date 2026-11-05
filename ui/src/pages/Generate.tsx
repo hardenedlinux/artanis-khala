@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api, type ComfyNodeInfo, type HistoryEntry, viewUrl } from "@/lib/api";
 import { buildPrompt } from "@/lib/prompt";
 import { initialWsState, previewFromBinary, reduceWsMessage, type WsState } from "@/lib/ws";
+import { newClientId } from "@/lib/client-id";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -31,7 +32,7 @@ export function GeneratePage() {
   const [ws, setWs] = useState<WsState>(initialWsState);
   const [image, setImage] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const clientId = useMemo(() => crypto.randomUUID(), []);
+  const clientId = useMemo(() => newClientId(), []);
 
   useEffect(() => {
     if (!model) setModel(checkpoints[0] ?? "e2e.safetensors");
