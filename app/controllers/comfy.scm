@@ -53,6 +53,8 @@
   (and (string? relative) (not (string-prefix? "/" relative))
        (not (member ".." (string-split relative #\/)))
        (let* ((root0 (config-ref config 'user_dir))
+              (_ (unless (file-exists? root0)
+                   (ensure-directory root0)))
               (root (canonicalize-path root0))
               (candidate (string-append root "/" relative))
               (resolved (if (file-exists? candidate)
