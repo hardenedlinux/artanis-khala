@@ -13,6 +13,20 @@
   (let ((inputs (value (cdr node) "inputs" '())))
     (value inputs key (if (null? default) #f (car default)))))
 
+(define (link-id connection)
+  (cond ((and (vector? connection) (>= (vector-length connection) 2))
+         (vector-ref connection 0))
+        ((and (list? connection) (>= (length connection) 2))
+         (car connection))
+        (else #f)))
+
+(define (find-class-by-link nodes class link)
+  (and link
+       (find (lambda (node)
+               (and (equal? class (value (cdr node) "class_type"))
+                    (equal? link (car node))))
+             nodes)))
+
 (define (topological-node-ids nodes)
   (let ((seen '()) (result '()))
     (define (visit id)
@@ -45,14 +59,21 @@
          (clip (or (find-class nodes "DualCLIPLoader")
                    (find-class nodes "CLIPLoader")))
          (vae (or checkpoint (find-class nodes "VAELoader")))
-         (positive (find-class nodes "CLIPTextEncode"))
-         (negative (and positive
-                        (find (lambda (node)
-                                (not (equal? (car node) (car positive))))
-                              (filter (lambda (node)
-                                        (equal? "CLIPTextEncode"
-                                               (value (cdr node) "class_type")))
-                                      nodes))))
+         (initial-sampler (find-class nodes "KSampler"))
+         (positive-link (and initial-sampler
+                             (link-id (node-input initial-sampler "positive"))))
+         (negative-link (and initial-sampler
+                             (link-id (node-input initial-sampler "negative"))))
+         (positive (or (find-class-by-link nodes "CLIPTextEncode" positive-link)
+                       (find-class nodes "CLIPTextEncode")))
+         (negative (or (find-class-by-link nodes "CLIPTextEncode" negative-link)
+                       (and positive
+                            (find (lambda (node)
+                                    (not (equal? (car node) (car positive))))
+                                  (filter (lambda (node)
+                                            (equal? "CLIPTextEncode"
+                                                   (value (cdr node) "class_type")))
+                                          nodes)))))
          (latent (or (find-class nodes "EmptyLatentImage")
                      (find-class nodes "EmptyImage")))
          (load-image (find-class nodes "LoadImage"))
