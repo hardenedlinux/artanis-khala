@@ -3,7 +3,7 @@
 (("moss-image"
   . ((display_name . "MOSS-Image")
      (folder . "checkpoints")
-     (directory . "MOSS-Image")
+     (directory . "MOSS-Image-SFT")
      (license
       . ((spdx . "unknown")
          (commercial_use . #f)

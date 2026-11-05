@@ -131,7 +131,26 @@
         (if (file-exists? path)
             (filter (lambda (name) (not (string-prefix? "." name))) (scandir path))
             '()))
-      (or (model-files config folder) '())))
+      (let* ((files (or (model-files config folder) '()))
+             (root (config-ref config 'models_root))
+             (catalog (if (file-exists? "conf/image-catalog.scm")
+                          (call-with-input-file "conf/image-catalog.scm" read)
+                          '()))
+             (directories
+              (filter-map
+               (lambda (entry)
+                 (let ((body (cdr entry)))
+                   (and (equal? (assq-ref body 'folder) folder)
+                        (let ((directory (assq-ref body 'directory)))
+                          (and directory
+                               (or (file-is-directory?
+                                    (string-append root "/" directory))
+                                   (file-is-directory?
+                                    (string-append root "/" folder "/" directory)))
+                               directory)))))
+               catalog)))
+        (sort (delete-duplicates (append files directories) string=?)
+              string<?))))
 
 (define (replace-combo info field-name values)
   (let* ((fields (json-object-fields info))
