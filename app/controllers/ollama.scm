@@ -53,7 +53,8 @@
      ((string-null? model)
         (response-emit (json-encode (error-json "model is required")) #:status 400))
      (else
-        (let ((producer
+        (let* ((failure #f)   ; (status . message) once the engine has failed
+               (producer
                (lambda (send)
                  (catch #t
                    (lambda ()
@@ -81,7 +82,10 @@
                                          (obj (cons "model" model) (cons "created_at" (ollama-now-string))
                                               (cons "response" token) (cons "done" #f))))))))))
                        (ollama-loaded-model-set! model)
-                       (let* ((text (assoc-ref result 'text))
+                       ;; A streamed reply has already been sent token by
+                       ;; token: its closing message carries no text, or a
+                       ;; client that appends every chunk shows it twice.
+                       (let* ((text (if stream? "" (assoc-ref result 'text)))
                               (final (if chat?
                                 (obj (cons "model" model) (cons "created_at" (ollama-now-string))
                                      (cons "message" (obj (cons "role" "assistant")
@@ -113,9 +117,18 @@
                                                                               (assoc-ref result 'eval_count))))))))
                           (else (write-line send final))))))
                    (lambda (key . args)
-                     (when (eq? key 'artanis-err) (apply throw key args))
-                     (format (current-error-port) "Khala fake LLM request failed: ~s ~s~%" key args)
-                     (cancel? #t))))))
+                     (if (eq? key 'artanis-err)
+                         ;; An engine reports "cannot answer" as
+                         ;; (artanis-err STATUS WHO MESSAGE). Answer with the
+                         ;; message as JSON, as Ollama does, instead of the
+                         ;; server's status page, which drops it.
+                         (let ((message (format #f "~a" (last args))))
+                           (set! failure (cons (car args) message))
+                           (write-line send (obj (cons "error" message))))
+                         (begin
+                           (format (current-error-port)
+                                   "Khala LLM request failed: ~s ~s~%" key args)
+                           (cancel? #t))))))))
           (if stream?
               (response-emit-stream producer
                 #:headers (if openai?
@@ -127,7 +140,9 @@
                 (let* ((lines (filter (lambda (x) (not (string-null? x)))
                                       (string-split (get-output-string out) #\newline)))
                        (last-line (if (null? lines) "{}" (last lines))))
-                  (response-emit last-line #:headers '((content-type . (application/json))))))))))))
+                  (response-emit last-line
+                                 #:status (if failure (car failure) 200)
+                                 #:headers '((content-type . (application/json))))))))))))
 
 (define (register-ollama-routes! config)
   (get "/api/version" (lambda _ (emit-json (obj (cons "version" "0.1.0")))))
