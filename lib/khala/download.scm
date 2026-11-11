@@ -219,8 +219,11 @@
        (when (directory-job-cancelled job)
          (throw 'directory-cancelled file))
        (let* ((path (car file)) (size (cadr file)) (sha (caddr file))
+              ;; A repository lists a SHA-256 only for its large (LFS)
+              ;; files. Without one the file is not verified; an empty
+              ;; string here would be compared and never match.
               (entry `((path . ,path) (size . ,size)
-                       (sha256 . ,(or sha ""))
+                       (sha256 . ,sha)
                        (sources . (,chosen))))
               (child (start-download-job entry (directory-job-part job))))
          (with-mutex (directory-job-lock job)
