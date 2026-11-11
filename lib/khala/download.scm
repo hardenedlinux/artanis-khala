@@ -365,8 +365,13 @@
         (lambda () (curl-easy-cleanup h) (close-port port))))))
 (define (rank-sources sources)
   (let ((cached (cached-source sources)))
-    (if cached
-        (cons cached (filter (lambda (s) (not (eq? s cached))) sources))
+    (cond
+     ;; One source leaves nothing to rank. Probing it only delays the job by
+     ;; a transfer that cancel-job! cannot interrupt.
+     ((or (null? sources) (null? (cdr sources))) sources)
+     (cached
+      (cons cached (filter (lambda (s) (not (eq? s cached))) sources)))
+     (else
         (let* ((threads
                 (map (lambda (source)
                        (call-with-new-thread (lambda () (probe-source source))))
@@ -385,7 +390,7 @@
                            (cons (+ (ticks) (* (cfg 'mirror_cache_minutes) 60
                                                (ticks-per-second)))
                                  (ref winner 'name))))))
-          (append ordered (filter (lambda (s) (not (member s ordered))) sources))))))
+          (append ordered (filter (lambda (s) (not (member s ordered))) sources)))))))
 (define (select-sources entry)
   (let* ((sources (catalog-sources entry)) (mirror (cfg 'mirror)))
     (if (or (not mirror) (equal? mirror "auto"))
