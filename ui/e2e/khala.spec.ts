@@ -1,16 +1,26 @@
 import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { expect, test } from "@playwright/test";
 
-const privateRoot = "/home/alexon/Project/khala-private";
 const runRoot = process.env.KHALA_RUN_DIR ?? "/tmp/khala-run7";
 
+// The Khala checkout is the directory above ui/. The private checkout holds
+// the start and stop scripts; by default it sits beside the Khala checkout.
+function roots() {
+  const khala = process.env.KHALA_SRC ?? path.resolve(test.info().config.rootDir, "..");
+  const privateRoot = process.env.KHALA_PRIVATE ?? path.resolve(khala, "..", "khala-private");
+  return { khala, privateRoot };
+}
+
 test.beforeAll(() => {
+  const { khala, privateRoot } = roots();
   execFileSync(`${privateRoot}/tests/browser/e2e-start.sh`, [], {
-    env: { ...process.env, KHALA_SRC: "/home/alexon/Project/khala", KHALA_RUN_DIR: runRoot },
+    env: { ...process.env, KHALA_SRC: khala, KHALA_RUN_DIR: runRoot },
   });
 });
 
 test.afterAll(() => {
+  const { privateRoot } = roots();
   execFileSync(`${privateRoot}/tests/browser/e2e-stop.sh`, [], {
     env: { ...process.env, KHALA_RUN_DIR: runRoot },
   });
