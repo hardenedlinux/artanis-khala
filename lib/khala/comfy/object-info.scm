@@ -48,7 +48,9 @@
                                                   (field "max" max)
                                                   (field "step" step))))))
         (str (lambda (name default) (input name (scalar "STRING" (obj (field "default" default))))))
-        (basic (lambda (name) (input name (scalar name #f)))))
+        ;; A linked input: NAME is the key a workflow uses, TYPE the socket
+        ;; type the frontend matches against node outputs.
+        (socket (lambda (name type) (input name (scalar type #f)))))
     (list
      (cons "CheckpointLoaderSimple"
        (schema "CheckpointLoaderSimple" "Load Checkpoint" "model/loaders"
@@ -76,7 +78,7 @@
      (cons "CLIPTextEncode"
        (schema "CLIPTextEncode" "CLIP Text Encode" "model/conditioning"
         (list (input "text" (scalar "STRING" (obj (field "multiline" #t) (field "dynamicPrompts" #t))))
-              (basic "clip"))
+              (socket "clip" "CLIP"))
         '("CONDITIONING") '("CONDITIONING") #f #f))
      (cons "EmptyLatentImage"
        (schema "EmptyLatentImage" "Empty Latent Image" "model/latent"
@@ -85,7 +87,7 @@
         '("LATENT") '("LATENT") #f #f))
      (cons "KSampler"
        (schema "KSampler" "KSampler" "model/sampling"
-        (list (basic "model") (int "seed" 0 0 18446744073709551615 1)
+        (list (socket "model" "MODEL") (int "seed" 0 0 18446744073709551615 1)
               (int "steps" 20 1 10000 1) (float "cfg" 8.0 0.0 100.0 0.1)
               (input "sampler_name" (combo '("euler" "euler_ancestral" "dpmpp_2m")))
               (input "scheduler" (combo '("normal" "karras" "simple")))
@@ -96,15 +98,16 @@
         '("LATENT") '("LATENT") #f #f))
      (cons "VAEDecode"
        (schema "VAEDecode" "VAE Decode" "model/latent"
-        (list (basic "samples") (basic "vae")) '("IMAGE") '("IMAGE") #f #f))
+        (list (socket "samples" "LATENT") (socket "vae" "VAE"))
+        '("IMAGE") '("IMAGE") #f #f))
      (cons "SaveImage"
        (schema "SaveImage" "Save Image" "image"
-        (list (basic "images") (str "filename_prefix" "ComfyUI"))
+        (list (socket "images" "IMAGE") (str "filename_prefix" "ComfyUI"))
         '("IMAGE") '("images") #t
         (list (input "prompt" (scalar "PROMPT" #f))
               (input "extra_pnginfo" (scalar "EXTRA_PNGINFO" #f)))))
      (cons "PreviewImage"
-       (schema "PreviewImage" "Preview Image" "image" (list (basic "images"))
+       (schema "PreviewImage" "Preview Image" "image" (list (socket "images" "IMAGE"))
         '("IMAGE") '("images") #t
         (list (input "prompt" (scalar "PROMPT" #f))
               (input "extra_pnginfo" (scalar "EXTRA_PNGINFO" #f)))))
@@ -117,13 +120,17 @@
               (int "batch_size" 1 1 4096 1) (int "color" 0 0 16777215 1))
         '("IMAGE") '("IMAGE") #f #f)))))
 
-(define (combo-folder name)
-  (cond ((string=? name "CheckpointLoaderSimple") "checkpoints")
-        ((string=? name "UNETLoader") "diffusion_models")
-        ((member name '("CLIPLoader" "DualCLIPLoader")) "text_encoders")
-        ((string=? name "VAELoader") "vae")
-        ((string=? name "LoadImage") "input")
-        (else #f)))
+;; COMBO inputs whose choices are the files of a folder: for each node class,
+;; (input name . folder). "input" is the upload directory; every other folder
+;; is a model folder under models_root.
+(define combo-sources
+  '(("CheckpointLoaderSimple" ("ckpt_name" . "checkpoints"))
+    ("UNETLoader" ("unet_name" . "diffusion_models"))
+    ("CLIPLoader" ("clip_name" . "text_encoders"))
+    ("DualCLIPLoader" ("clip_name1" . "text_encoders")
+                      ("clip_name2" . "text_encoders"))
+    ("VAELoader" ("vae_name" . "vae"))
+    ("LoadImage" ("image" . "input"))))
 
 ;; file-is-directory? raises for a path that does not exist; a catalog entry
 ;; whose model is not installed is simply not listed.
@@ -180,17 +187,21 @@
 
 (define (object-info config . maybe-name)
   (let* ((all (registry))
+         (listed '())                   ; folder -> files, read once per call
+         (files (lambda (folder)
+                  (cdr (or (assoc folder listed)
+                           (let ((entry (cons folder (folder-files config folder))))
+                             (set! listed (cons entry listed))
+                             entry)))))
          (all (map (lambda (entry)
-                     (let ((folder (combo-folder (car entry))))
-                       (if folder
+                     (let ((sources (assoc (car entry) combo-sources)))
+                       (if sources
                            (cons (car entry)
-                                 (replace-combo (cdr entry)
-                                   (cond ((string=? folder "checkpoints") "ckpt_name")
-                                         ((string=? folder "diffusion_models") "unet_name")
-                                         ((string=? folder "text_encoders") "clip_name")
-                                         ((string=? folder "vae") "vae_name")
-                                         (else "image"))
-                                   (folder-files config folder)))
+                                 (fold (lambda (source info)
+                                         (replace-combo info (car source)
+                                                        (files (cdr source))))
+                                       (cdr entry)
+                                       (cdr sources)))
                            entry)))
                    all))
          (options (engine-sampler-options
