@@ -14,7 +14,10 @@
 (define (scalar type options) (if options (list type options) (list type)))
 (define (input name schema) (cons name schema))
 
-(define (schema name display category required outputs names is-output hidden)
+;; MODULE is the ComfyUI module that defines the node; the frontend shows it
+;; as the node's source.
+(define* (schema name display category required outputs names is-output hidden
+                 #:optional (module "nodes"))
   (let ((hidden (or hidden '())))
     (obj
      (field "input" (obj (field "required" (make-json-object required))
@@ -30,7 +33,7 @@
      (field "name" name)
      (field "display_name" display)
      (field "description" "")
-     (field "python_module" "nodes")
+     (field "python_module" module)
      (field "category" category)
      (field "output_node" is-output)
      (field "has_intermediate_output" #f)
@@ -50,7 +53,8 @@
         (str (lambda (name default) (input name (scalar "STRING" (obj (field "default" default))))))
         ;; A linked input: NAME is the key a workflow uses, TYPE the socket
         ;; type the frontend matches against node outputs.
-        (socket (lambda (name type) (input name (scalar type #f)))))
+        (socket (lambda (name type) (input name (scalar type #f))))
+        (upscale-module "comfy_extras.nodes_upscale_model"))
     (list
      (cons "CheckpointLoaderSimple"
        (schema "CheckpointLoaderSimple" "Load Checkpoint" "model/loaders"
@@ -75,6 +79,23 @@
      (cons "VAELoader" (schema "VAELoader" "Load VAE" "model/loaders"
                                 (list (input "vae_name" (combo '())))
                                 '("VAE") '("VAE") #f #f))
+     (cons "LoraLoader"
+       (schema "LoraLoader" "Load LoRA (Model and CLIP)" "model/loaders"
+        (list (socket "model" "MODEL") (socket "clip" "CLIP")
+              (input "lora_name" (combo '()))
+              (float "strength_model" 1.0 -100.0 100.0 0.01)
+              (float "strength_clip" 1.0 -100.0 100.0 0.01))
+        '("MODEL" "CLIP") '("MODEL" "CLIP") #f #f))
+     (cons "LoraLoaderModelOnly"
+       (schema "LoraLoaderModelOnly" "Load LoRA" "model/loaders"
+        (list (socket "model" "MODEL")
+              (input "lora_name" (combo '()))
+              (float "strength_model" 1.0 -100.0 100.0 0.01))
+        '("MODEL") '("MODEL") #f #f))
+     (cons "UpscaleModelLoader"
+       (schema "UpscaleModelLoader" "Load Upscale Model" "model/loaders"
+        (list (input "model_name" (combo '())))
+        '("UPSCALE_MODEL") '("UPSCALE_MODEL") #f #f upscale-module))
      (cons "CLIPTextEncode"
        (schema "CLIPTextEncode" "CLIP Text Encode" "model/conditioning"
         (list (input "text" (scalar "STRING" (obj (field "multiline" #t) (field "dynamicPrompts" #t))))
@@ -84,6 +105,27 @@
        (schema "EmptyLatentImage" "Empty Latent Image" "model/latent"
         (list (int "width" 1024 16 16384 8) (int "height" 1024 16 16384 8)
               (int "batch_size" 1 1 4096 1))
+        '("LATENT") '("LATENT") #f #f))
+     (cons "VAEEncode"
+       (schema "VAEEncode" "VAE Encode" "model/latent"
+        (list (socket "pixels" "IMAGE") (socket "vae" "VAE"))
+        '("LATENT") '("LATENT") #f #f))
+     (cons "VAEEncodeForInpaint"
+       (schema "VAEEncodeForInpaint" "VAE Encode (for Inpainting)" "model/latent"
+        (list (socket "pixels" "IMAGE") (socket "vae" "VAE") (socket "mask" "MASK")
+              (int "grow_mask_by" 6 0 64 1))
+        '("LATENT") '("LATENT") #f #f))
+     (cons "SetLatentNoiseMask"
+       (schema "SetLatentNoiseMask" "Set Latent Noise Mask" "model/latent"
+        (list (socket "samples" "LATENT") (socket "mask" "MASK"))
+        '("LATENT") '("LATENT") #f #f))
+     (cons "LatentUpscale"
+       (schema "LatentUpscale" "Upscale Latent" "model/latent"
+        (list (socket "samples" "LATENT")
+              (input "upscale_method"
+                     (combo '("nearest-exact" "bilinear" "area" "bicubic" "bislerp")))
+              (int "width" 512 0 16384 8) (int "height" 512 0 16384 8)
+              (input "crop" (combo '("disabled" "center"))))
         '("LATENT") '("LATENT") #f #f))
      (cons "KSampler"
        (schema "KSampler" "KSampler" "model/sampling"
@@ -118,7 +160,19 @@
        (schema "EmptyImage" "Empty Image" "image"
         (list (int "width" 512 1 16384 1) (int "height" 512 1 16384 1)
               (int "batch_size" 1 1 4096 1) (int "color" 0 0 16777215 1))
-        '("IMAGE") '("IMAGE") #f #f)))))
+        '("IMAGE") '("IMAGE") #f #f))
+     (cons "ImageScale"
+       (schema "ImageScale" "Upscale Image" "image/upscaling"
+        (list (socket "image" "IMAGE")
+              (input "upscale_method"
+                     (combo '("nearest-exact" "bilinear" "area" "bicubic" "lanczos")))
+              (int "width" 512 0 16384 1) (int "height" 512 0 16384 1)
+              (input "crop" (combo '("disabled" "center"))))
+        '("IMAGE") '("IMAGE") #f #f))
+     (cons "ImageUpscaleWithModel"
+       (schema "ImageUpscaleWithModel" "Upscale Image (using Model)" "image/upscaling"
+        (list (socket "upscale_model" "UPSCALE_MODEL") (socket "image" "IMAGE"))
+        '("IMAGE") '("IMAGE") #f #f upscale-module)))))
 
 ;; COMBO inputs whose choices are the files of a folder: for each node class,
 ;; (input name . folder). "input" is the upload directory; every other folder
@@ -130,6 +184,9 @@
     ("DualCLIPLoader" ("clip_name1" . "text_encoders")
                       ("clip_name2" . "text_encoders"))
     ("VAELoader" ("vae_name" . "vae"))
+    ("LoraLoader" ("lora_name" . "loras"))
+    ("LoraLoaderModelOnly" ("lora_name" . "loras"))
+    ("UpscaleModelLoader" ("model_name" . "upscale_models"))
     ("LoadImage" ("image" . "input"))))
 
 ;; file-is-directory? raises for a path that does not exist; a catalog entry

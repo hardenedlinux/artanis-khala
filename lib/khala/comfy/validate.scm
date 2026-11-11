@@ -28,6 +28,14 @@
             (and allowed (not (member value allowed)) (cons field value))))
         inputs)))
 
+;; Registered so the frontend and saved workflows load, but not lowered to an
+;; engine job yet. A prompt that uses one is rejected by name rather than run
+;; with the node ignored.
+(define pending-classes
+  '("LoraLoader" "LoraLoaderModelOnly" "UpscaleModelLoader" "VAEEncode"
+    "VAEEncodeForInpaint" "SetLatentNoiseMask" "LatentUpscale" "ImageScale"
+    "ImageUpscaleWithModel"))
+
 (define (validate-prompt config prompt)
   (let* ((nodes (if (list? prompt) prompt '()))
          (registry (object-info config))
@@ -74,8 +82,9 @@
                         (missing (filter (lambda (input)
                                            (not (assoc (car input) inputs)))
                                          required)))
-                   (let ((bad-combo (combo-error config class inputs)))
-                   (if (and (null? missing) (not bad-combo))
+                   (let ((bad-combo (combo-error config class inputs))
+                         (pending (member class pending-classes)))
+                   (if (and (null? missing) (not bad-combo) (not pending))
                        #f
                        (cons node-id
                              (make-json-object
@@ -96,6 +105,14 @@
                                                             (make-json-object
                                                              (list (cons "input_name"
                                                                          (car bad-combo))))))
+                                          '())
+                                      (if pending
+                                          (list (make-error "custom_validation_failed"
+                                                            "Khala cannot run this node yet"
+                                                            class
+                                                            (make-json-object
+                                                             (list (cons "node_id" node-id)
+                                                                   (cons "class_type" class)))))
                                           '())))
                                (cons "dependent_outputs" '())
                                (cons "class_type" class)))))))))))
