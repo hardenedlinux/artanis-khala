@@ -125,6 +125,11 @@
         ((string=? name "LoadImage") "input")
         (else #f)))
 
+;; file-is-directory? raises for a path that does not exist; a catalog entry
+;; whose model is not installed is simply not listed.
+(define (directory? path)
+  (and (file-exists? path) (file-is-directory? path)))
+
 (define (folder-files config folder)
   (if (string=? folder "input")
       (let ((path (config-ref config 'input_dir)))
@@ -143,9 +148,9 @@
                    (and (equal? (assq-ref body 'folder) folder)
                         (let ((directory (assq-ref body 'directory)))
                           (and directory
-                               (or (file-is-directory?
+                               (or (directory?
                                     (string-append root "/" directory))
-                                   (file-is-directory?
+                                   (directory?
                                     (string-append root "/" folder "/" directory)))
                                directory)))))
                catalog)))
