@@ -118,7 +118,9 @@
              (let ((text (png-read-text
                           (call-with-input-file path get-bytevector-all) "khala")))
                (if text
-                   (reply-json (json-string->scm text))
+                   ;; A decoded object is an alist, which json-encode
+                   ;; would write as an array: normalize it first.
+                   (reply-json (json-normalize (json-string->scm text)))
                    (reply-json (obj (cons "error" "provenance not found")) 404)))
              (reply-json (obj (cons "error" "image not found")) 404)))))
 (get "/khala/api/settings"
