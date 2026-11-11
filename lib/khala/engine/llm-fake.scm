@@ -16,10 +16,16 @@
 (define* (engine-chat model messages options #:key (on-token (lambda (_) #t))
                       (cancelled? (lambda () #f)))
   (let* ((items (if (vector? messages) (vector->list messages) messages))
+         ;; Prompt enhancement asks for a JSON reply (format = json) under a
+         ;; system prompt. The wording of conf/prompt-enhance.txt is free to
+         ;; change, so the request's format decides, not a phrase in it.
+         (json-reply? (and (list? options)
+                           (equal? (assoc-ref options "format") "json")))
          (enhance? (any (lambda (message)
                           (and (equal? (assoc-ref message "role") "system")
-                               (string-contains (or (assoc-ref message "content") "")
-                                                "Rewrite the request")))
+                               (or json-reply?
+                                   (string-contains (or (assoc-ref message "content") "")
+                                                    "Rewrite the request"))))
                         items))
          (text (last-user-message messages))
          (text (if enhance?
@@ -30,7 +36,9 @@
                       ("negative" . "blurry, low quality")))
                    text))
          (words (string-split text #\space))
-         (tokens (reverse words))
+         ;; Chat echoes the words reversed. The enhancement reply is JSON the
+         ;; caller parses, so its words must keep their order.
+         (tokens (if enhance? words (reverse words)))
          (start (get-internal-real-time)))
     (for-each (lambda (word)
                 (unless (cancelled?)
