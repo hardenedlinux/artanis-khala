@@ -28,9 +28,10 @@ documented in this repository.
 - GNU Guile 3.0
 - GNU Artanis
 - guile-json
-- guile-curl with the Khala extensions (`khala` branch)
+- guile-curl with this patch: https://github.com/spk121/guile-curl/pull/19
 - Node.js and npm for the Khala UI
 - Optional: a CUDA-capable SonicBoom build for real inference
+  - https://github.com/hardenedlinux/sonicboom
 
 Ensure Guile loads the patched guile-curl extension rather than an older system
 package. In the development setup, `khala-private/tools/env.sh` configures:
