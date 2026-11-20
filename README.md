@@ -65,6 +65,7 @@ art work
 Open:
 
 - Khala UI: `http://127.0.0.1:3000/khala/`
+- Khala Studio writing prototype: `http://127.0.0.1:3000/studio`
 - ComfyUI-compatible node editor: `http://127.0.0.1:3000/`
 
 To listen on a LAN interface:
@@ -124,6 +125,7 @@ Starting Khala must not automatically load SonicBoom or occupy the GPU.
 - [ComfyUI compatibility](docs/usage/en/comfyui-compat.md)
 - [Ollama API subset](docs/usage/en/ollama.md)
 - [Khala UI](docs/usage/ui.md)
+- [Studio API v1](docs/api/studio-v1.md)
 
 Chinese and Japanese equivalents are under `docs/usage/zh/` and
 `docs/usage/ja/`.

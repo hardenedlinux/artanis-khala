@@ -14,6 +14,8 @@ Khala reads `conf/khala.conf`. Values use `key = value`; blank lines and `#` com
 | `persist_history` | `no` | Persist history when `yes`. |
 | `persist_queue` | `no` | Restore pending prompts when `yes`. |
 | `history_db` | `var/history.sqlite3` | SQLite database path for persistence. |
+| `studio_db` | `var/studio.sqlite3` | Separate SQLite database for Khala Studio writing data. |
+| `studio_model` | empty | Default Studio writing model; when empty, use the first installed LLM or the fake test model. |
 | `extra_model_paths` | empty | Optional ComfyUI `extra_model_paths.yaml` path. |
 | `mirror` | `auto` | Model source selection: `auto`, `huggingface`, `hf-mirror`, `modelscope`, or a name configured by `custom_mirror.<name>`. |
 | `download_threads` | `4` | Concurrent model download chunks. |

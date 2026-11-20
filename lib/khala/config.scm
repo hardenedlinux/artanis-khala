@@ -16,6 +16,8 @@
     (persist_history . #f)
     (persist_queue . #f)
     (history_db . "var/history.sqlite3")
+    (studio_db . "var/studio.sqlite3")
+    (studio_model . "")
     (extra_model_paths . "")
     (mirror . "auto")
     (download_threads . 4)
