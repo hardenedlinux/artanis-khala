@@ -112,6 +112,14 @@
    #:headers '((content-type . (text/html (charset . "utf-8")))
                (cache-control . (no-cache)))))
 
+(define (studio-static-file path content-type)
+  (if (file-exists? path)
+      (response-emit
+       (call-with-input-file path get-bytevector-all)
+       #:headers `((content-type . ,content-type)
+                   (cache-control . (no-cache))))
+      (response-emit "Not found" #:status 404)))
+
 (define (inspire-handler rc)
   (let* ((workplace-id (params rc "workplace_id"))
          (document-id (params rc "document_id"))
@@ -172,6 +180,24 @@
 
 (get "/studio" (lambda _ (studio-page)))
 (get "/studio/index.html" (lambda _ (studio-page)))
+
+(get "/studio/assets/studio-ui"
+     (lambda _
+       (studio-static-file "studio-ui/dist/studio-ui.js" '(text/javascript))))
+
+(get "/studio/assets/studio-ui-theme"
+     (lambda _
+       (studio-static-file "studio-ui/dist/studio-ui.css" '(text/css))))
+
+(get "/studio/assets/react"
+     (lambda _
+       (studio-static-file
+        "studio-ui/dist/vendor/react.production.min.js" '(text/javascript))))
+
+(get "/studio/assets/react-dom"
+     (lambda _
+       (studio-static-file
+        "studio-ui/dist/vendor/react-dom.production.min.js" '(text/javascript))))
 
 (get "/studio/api/v1/capabilities"
      (lambda _ (api-handler (lambda () (reply-success (studio-capabilities config))))))

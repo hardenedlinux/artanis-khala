@@ -1,0 +1,30 @@
+;; Add these helpers/routes to app/controllers/studio.scm.
+;; Keep the existing API routes and all legacy routes unchanged.
+
+(define (studio-static-file path content-type)
+  (if (file-exists? path)
+      (response-emit
+       (call-with-input-file path get-bytevector-all)
+       #:headers `((content-type . ,content-type)
+                   (cache-control . (no-cache))))
+      (response-emit "Not found" #:status 404)))
+
+;; The paths are intentionally allowlisted. Do not derive a filesystem path
+;; from an arbitrary URL segment.
+(get "/studio/assets/studio-ui"
+     (lambda _
+       (studio-static-file "studio-ui/dist/studio-ui.js" '(text/javascript))))
+
+(get "/studio/assets/studio-ui-theme"
+     (lambda _
+       (studio-static-file "studio-ui/dist/studio-ui.css" '(text/css))))
+
+(get "/studio/assets/react"
+     (lambda _
+       (studio-static-file
+        "studio-ui/dist/vendor/react.production.min.js" '(text/javascript))))
+
+(get "/studio/assets/react-dom"
+     (lambda _
+       (studio-static-file
+        "studio-ui/dist/vendor/react-dom.production.min.js" '(text/javascript))))

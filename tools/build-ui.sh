@@ -6,3 +6,9 @@ if ! npm ci; then
   npm ci --registry=https://registry.npmmirror.com
 fi
 npm run build
+
+cd "$root/studio-ui"
+if ! npm ci; then
+  npm ci --registry=https://registry.npmmirror.com
+fi
+npm run build

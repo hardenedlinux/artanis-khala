@@ -100,3 +100,4 @@ temp/
 vendor/comfyui-frontend/
 pub/
 tmp/
+test/studio/__pycache__/

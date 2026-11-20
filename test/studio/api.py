@@ -46,6 +46,26 @@ capabilities = json_request("GET", "/studio/api/v1/capabilities")
 check("capabilities", capabilities["api_version"] == 1 and capabilities["ai_available"])
 check("fake-model", any(item["id"] == "fake" for item in capabilities["models"]))
 
+status, page, _ = request("GET", "/studio")
+check(
+    "studio-shell",
+    status == 200 and b"/studio/assets/studio-ui" in page,
+)
+for asset_path, content_type in (
+    ("/studio/assets/studio-ui", "text/javascript"),
+    ("/studio/assets/studio-ui-theme", "text/css"),
+    ("/studio/assets/react", "text/javascript"),
+    ("/studio/assets/react-dom", "text/javascript"),
+):
+    status, asset, headers = request("GET", asset_path)
+    assert status == 200 and asset, (asset_path, status)
+    assert headers.get("Content-Type", "").startswith(content_type), (
+        asset_path,
+        headers.get("Content-Type"),
+    )
+status, _, _ = request("GET", "/studio/assets/not-allowlisted")
+check("studio-assets-allowlisted", status == 404)
+
 workplace = json_request(
     "POST",
     "/studio/api/v1/workplaces",

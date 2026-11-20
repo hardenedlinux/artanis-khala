@@ -44,7 +44,7 @@ LD_LIBRARY_PATH
 
 ## Build and run
 
-Build the Khala UI:
+Build both the Khala UI and the Studio UI:
 
 ```sh
 ./tools/build-ui.sh
