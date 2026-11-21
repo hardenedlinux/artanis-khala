@@ -19,6 +19,19 @@
             studio-get-character
             studio-update-character!
             studio-archive-character!
+            studio-set-character-avatar!
+            studio-list-character-drafts
+            studio-get-character-draft
+            studio-save-character-draft!
+            studio-delete-character-draft!
+            studio-apply-character-draft!
+            studio-list-character-outfits
+            studio-get-character-outfit
+            studio-create-character-outfit!
+            studio-update-character-outfit!
+            studio-archive-character-outfit!
+            studio-set-default-character-outfit!
+            studio-set-character-outfit-reference!
             studio-list-scenes
             studio-create-scene!
             studio-get-scene
@@ -210,10 +223,58 @@
    "ALTER TABLE studio_scenes
       ADD COLUMN storyboard TEXT NOT NULL DEFAULT '[]'"))
 
+;; Character Studio keeps AI proposals physically separate from the approved
+;; character identity. Outfits are character-owned records; artwork binaries
+;; continue to live in studio_assets and are linked through studio_asset_links.
+(define migration-6
+  (list
+   "ALTER TABLE studio_characters
+      ADD COLUMN concept TEXT NOT NULL DEFAULT ''"
+   "ALTER TABLE studio_characters
+      ADD COLUMN avatar_asset_id TEXT"
+   "CREATE TABLE IF NOT EXISTS studio_character_identity_drafts (
+      character_id TEXT NOT NULL REFERENCES studio_characters(id) ON DELETE CASCADE,
+      section TEXT NOT NULL CHECK(section IN
+        ('literary_identity', 'visual_identity',
+         'vocal_identity', 'performance_identity')),
+      content TEXT NOT NULL DEFAULT '{}',
+      source TEXT NOT NULL DEFAULT 'ai' CHECK(source IN ('ai', 'author')),
+      model TEXT NOT NULL DEFAULT '',
+      author_edited INTEGER NOT NULL DEFAULT 0 CHECK(author_edited IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(character_id, section)
+    )"
+   "CREATE TABLE IF NOT EXISTS studio_character_outfits (
+      id TEXT PRIMARY KEY,
+      character_id TEXT NOT NULL REFERENCES studio_characters(id) ON DELETE CASCADE,
+      name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+      kind TEXT NOT NULL DEFAULT 'custom' CHECK(kind IN
+        ('standard', 'casual', 'battle', 'formal', 'custom')),
+      description TEXT NOT NULL DEFAULT '',
+      components TEXT NOT NULL DEFAULT '[]',
+      materials TEXT NOT NULL DEFAULT '[]',
+      colors TEXT NOT NULL DEFAULT '[]',
+      accessories TEXT NOT NULL DEFAULT '[]',
+      special_features TEXT NOT NULL DEFAULT '[]',
+      image_prompt TEXT NOT NULL DEFAULT '',
+      reference_asset_id TEXT,
+      is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT
+    )"
+   "CREATE INDEX IF NOT EXISTS studio_character_outfits_character
+      ON studio_character_outfits(character_id, archived_at, is_default DESC,
+                                  updated_at DESC)"
+   "CREATE UNIQUE INDEX IF NOT EXISTS studio_character_outfits_default
+      ON studio_character_outfits(character_id) WHERE is_default = 1
+        AND archived_at IS NULL"))
+
 (define (migrations)
   (list (cons 1 migration-1) (cons 2 migration-2)
         (cons 3 migration-3) (cons 4 migration-4)
-        (cons 5 migration-5)))
+        (cons 5 migration-5) (cons 6 migration-6)))
 
 (define (studio-now)
   (strftime "%Y-%m-%dT%H:%M:%SZ" (gmtime (current-time))))
@@ -444,8 +505,9 @@
             (workplace-by-id db id)))))))
 
 (define character-columns
-  "id, workplace_id, name, role, summary, literary_identity, visual_identity,
-   vocal_identity, performance_identity, created_at, updated_at, archived_at")
+  "id, workplace_id, name, role, summary, concept,
+   literary_identity, visual_identity, vocal_identity, performance_identity,
+   avatar_asset_id, created_at, updated_at, archived_at")
 
 (define (character-from-row row)
   `((id . ,(row-value row "id"))
@@ -453,10 +515,12 @@
     (name . ,(row-value row "name"))
     (role . ,(row-value row "role"))
     (summary . ,(row-value row "summary"))
+    (concept . ,(or (row-value row "concept") ""))
     (literary_identity . ,(or (row-value row "literary_identity") "{}"))
     (visual_identity . ,(or (row-value row "visual_identity") "{}"))
     (vocal_identity . ,(or (row-value row "vocal_identity") "{}"))
     (performance_identity . ,(or (row-value row "performance_identity") "{}"))
+    (avatar_asset_id . ,(row-value row "avatar_asset_id"))
     (created_at . ,(row-value row "created_at"))
     (updated_at . ,(row-value row "updated_at"))
     (archived_at . ,(row-value row "archived_at"))))
@@ -479,8 +543,9 @@
              workplace-id)
       (map character-from-row (all-rows db)))))
 
-(define (studio-create-character! config id workplace-id name role summary
-                                  literary visual vocal performance)
+(define* (studio-create-character! config id workplace-id name role summary
+                                   literary visual vocal performance
+                                   #:key (concept ""))
   (with-db config
     (lambda (db)
       (with-transaction db
@@ -488,12 +553,12 @@
           (let ((now (studio-now)))
             (query db
                    "INSERT INTO studio_characters
-                      (id, workplace_id, name, role, summary,
+                      (id, workplace_id, name, role, summary, concept,
                        literary_identity, visual_identity,
                        vocal_identity, performance_identity,
                        created_at, updated_at)
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                   id workplace-id name role summary
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   id workplace-id name role summary concept
                    literary visual vocal performance now now)
             (character-by-id db workplace-id id)))))))
 
@@ -507,9 +572,10 @@
         (lambda ()
           (let* ((now (studio-now))
                  (clause (update-clause updates
-                                        '(name role summary
+                                        '(name role summary concept
                                           literary_identity visual_identity
-                                          vocal_identity performance_identity)))
+                                          vocal_identity performance_identity
+                                          avatar_asset_id)))
                  (sets (car clause))
                  (values (cdr clause)))
             (if (null? sets)
@@ -542,6 +608,316 @@
                                WHERE resource_type = 'character' AND resource_id = ?"
                           character-id)
                    now))))))))
+
+(define (set-character-avatar! db workplace-id character-id asset-id)
+  (let ((now (studio-now)))
+    (query db "UPDATE studio_characters
+                  SET avatar_asset_id = ?, updated_at = ?
+                WHERE id = ? AND workplace_id = ? AND archived_at IS NULL"
+           (sql-value asset-id) now character-id workplace-id)
+    (and (> (dbi-affected-rows db) 0)
+         (character-by-id db workplace-id character-id))))
+
+(define (studio-set-character-avatar! config workplace-id character-id asset-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (set-character-avatar! db workplace-id character-id asset-id))))))
+
+(define (character-draft-from-row row)
+  `((character_id . ,(row-value row "character_id"))
+    (section . ,(row-value row "section"))
+    (content . ,(or (row-value row "content") "{}"))
+    (source . ,(or (row-value row "source") "ai"))
+    (model . ,(or (row-value row "model") ""))
+    (author_edited . ,(= 1 (db-int (row-value row "author_edited"))))
+    (created_at . ,(row-value row "created_at"))
+    (updated_at . ,(row-value row "updated_at"))))
+
+(define (studio-list-character-drafts config workplace-id character-id)
+  (with-db config
+    (lambda (db)
+      (and (character-by-id db workplace-id character-id)
+           (begin
+             (query db
+                    "SELECT character_id, section, content, source, model,
+                            author_edited, created_at, updated_at
+                       FROM studio_character_identity_drafts
+                      WHERE character_id = ?
+                      ORDER BY CASE section
+                        WHEN 'literary_identity' THEN 1
+                        WHEN 'visual_identity' THEN 2
+                        WHEN 'vocal_identity' THEN 3
+                        ELSE 4 END"
+                    character-id)
+             (map character-draft-from-row (all-rows db)))))))
+
+(define (studio-get-character-draft config workplace-id character-id section)
+  (with-db config
+    (lambda (db)
+      (and (character-by-id db workplace-id character-id)
+           (begin
+             (query db
+                    "SELECT character_id, section, content, source, model,
+                            author_edited, created_at, updated_at
+                       FROM studio_character_identity_drafts
+                      WHERE character_id = ? AND section = ?"
+                    character-id section)
+             (let ((row (dbi-get_row db)))
+               (and row (character-draft-from-row row))))))))
+
+(define (studio-save-character-draft! config workplace-id character-id section
+                                      content source model author-edited)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (unless (character-by-id db workplace-id character-id)
+            (throw 'studio-draft-error 'character-not-found))
+          (let ((now (studio-now)))
+            (query db
+                   "INSERT INTO studio_character_identity_drafts
+                      (character_id, section, content, source, model,
+                       author_edited, created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(character_id, section) DO UPDATE SET
+                      content = excluded.content,
+                      source = excluded.source,
+                      model = excluded.model,
+                      author_edited = excluded.author_edited,
+                      updated_at = excluded.updated_at"
+                   character-id section content source model
+                   (if author-edited 1 0) now now)
+            (query db
+                   "SELECT character_id, section, content, source, model,
+                           author_edited, created_at, updated_at
+                      FROM studio_character_identity_drafts
+                     WHERE character_id = ? AND section = ?"
+                   character-id section)
+            (character-draft-from-row (dbi-get_row db))))))))
+
+(define (studio-delete-character-draft! config workplace-id character-id section)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (unless (character-by-id db workplace-id character-id)
+            (throw 'studio-draft-error 'character-not-found))
+          (query db "DELETE FROM studio_character_identity_drafts
+                      WHERE character_id = ? AND section = ?"
+                 character-id section)
+          (> (dbi-affected-rows db) 0))))))
+
+(define (studio-apply-character-draft! config workplace-id character-id
+                                       section identity-json)
+  (let ((column (case (string->symbol section)
+                  ((literary_identity visual_identity vocal_identity
+                    performance_identity) (string->symbol section))
+                  (else #f))))
+    (unless column (throw 'studio-draft-error 'invalid-section))
+    (with-db config
+      (lambda (db)
+        (with-transaction db
+          (lambda ()
+            (unless (character-by-id db workplace-id character-id)
+              (throw 'studio-draft-error 'character-not-found))
+            (let ((now (studio-now)))
+              (dbi-params-query db
+                (format #f "UPDATE studio_characters SET ~a = ?, updated_at = ?
+                             WHERE id = ? AND workplace_id = ? AND archived_at IS NULL"
+                        column)
+                (list identity-json now character-id workplace-id))
+              (query db "DELETE FROM studio_character_identity_drafts
+                          WHERE character_id = ? AND section = ?"
+                     character-id section)
+              (character-by-id db workplace-id character-id))))))))
+
+(define outfit-columns
+  "o.id, o.character_id, o.name, o.kind, o.description, o.components,
+   o.materials, o.colors, o.accessories, o.special_features, o.image_prompt,
+   o.reference_asset_id, o.is_default, o.created_at, o.updated_at,
+   o.archived_at")
+
+(define (outfit-from-row row)
+  `((id . ,(row-value row "id"))
+    (character_id . ,(row-value row "character_id"))
+    (name . ,(row-value row "name"))
+    (kind . ,(or (row-value row "kind") "custom"))
+    (description . ,(or (row-value row "description") ""))
+    (components . ,(or (row-value row "components") "[]"))
+    (materials . ,(or (row-value row "materials") "[]"))
+    (colors . ,(or (row-value row "colors") "[]"))
+    (accessories . ,(or (row-value row "accessories") "[]"))
+    (special_features . ,(or (row-value row "special_features") "[]"))
+    (image_prompt . ,(or (row-value row "image_prompt") ""))
+    (reference_asset_id . ,(row-value row "reference_asset_id"))
+    (is_default . ,(= 1 (db-int (row-value row "is_default"))))
+    (created_at . ,(row-value row "created_at"))
+    (updated_at . ,(row-value row "updated_at"))
+    (archived_at . ,(row-value row "archived_at"))))
+
+(define (outfit-by-id db workplace-id character-id outfit-id)
+  (query db
+         (string-append
+          "SELECT " outfit-columns "
+             FROM studio_character_outfits o
+             JOIN studio_characters ch ON ch.id = o.character_id
+            WHERE o.id = ? AND o.character_id = ? AND ch.workplace_id = ?
+              AND ch.archived_at IS NULL AND o.archived_at IS NULL")
+         outfit-id character-id workplace-id)
+  (let ((row (dbi-get_row db))) (and row (outfit-from-row row))))
+
+(define (studio-list-character-outfits config workplace-id character-id)
+  (with-db config
+    (lambda (db)
+      (and (character-by-id db workplace-id character-id)
+           (begin
+             (query db
+                    (string-append
+                     "SELECT " outfit-columns "
+                        FROM studio_character_outfits o
+                        JOIN studio_characters ch ON ch.id = o.character_id
+                       WHERE o.character_id = ? AND ch.workplace_id = ?
+                         AND ch.archived_at IS NULL AND o.archived_at IS NULL
+                       ORDER BY o.is_default DESC, o.created_at ASC, o.id ASC")
+                    character-id workplace-id)
+             (map outfit-from-row (all-rows db)))))))
+
+(define (studio-get-character-outfit config workplace-id character-id outfit-id)
+  (with-db config
+    (lambda (db) (outfit-by-id db workplace-id character-id outfit-id))))
+
+(define (clear-default-outfits! db character-id)
+  (query db "UPDATE studio_character_outfits SET is_default = 0, updated_at = ?
+              WHERE character_id = ? AND is_default = 1"
+         (studio-now) character-id))
+
+(define (active-outfit-count db character-id)
+  (query db "SELECT COUNT(*) AS count FROM studio_character_outfits
+              WHERE character_id = ? AND archived_at IS NULL"
+         character-id)
+  (db-int (row-value (dbi-get_row db) "count")))
+
+(define (studio-create-character-outfit! config id workplace-id character-id values)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (unless (character-by-id db workplace-id character-id)
+            (throw 'studio-outfit-error 'character-not-found))
+          (let* ((now (studio-now))
+                 (first? (= 0 (active-outfit-count db character-id)))
+                 (default? (or first? (eq? (assoc-ref values 'is_default) #t)))
+                 (field (lambda (key default)
+                          (let ((value (assoc-ref values key)))
+                            (if value value default)))))
+            (when default? (clear-default-outfits! db character-id))
+            (query db
+                   "INSERT INTO studio_character_outfits
+                      (id, character_id, name, kind, description, components,
+                       materials, colors, accessories, special_features,
+                       image_prompt, reference_asset_id, is_default,
+                       created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   id character-id (assoc-ref values 'name)
+                   (field 'kind "custom") (field 'description "")
+                   (field 'components "[]") (field 'materials "[]")
+                   (field 'colors "[]") (field 'accessories "[]")
+                   (field 'special_features "[]") (field 'image_prompt "")
+                   (sql-value (assoc-ref values 'reference_asset_id))
+                   (if default? 1 0) now now)
+            (outfit-by-id db workplace-id character-id id)))))))
+
+(define (studio-update-character-outfit! config workplace-id character-id
+                                         outfit-id updates)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (unless (outfit-by-id db workplace-id character-id outfit-id)
+            (throw 'studio-outfit-error 'outfit-not-found))
+          (let* ((now (studio-now))
+                 (make-default? (eq? (assoc-ref updates 'is_default) #t))
+                 (clause (update-clause
+                          updates
+                          '(name kind description components materials colors
+                            accessories special_features image_prompt
+                            reference_asset_id is_default)))
+                 (sets (car clause))
+                 (values (cdr clause)))
+            (when make-default? (clear-default-outfits! db character-id))
+            (if (null? sets)
+                (outfit-by-id db workplace-id character-id outfit-id)
+                (begin
+                  (dbi-params-query db
+                    (string-append
+                     "UPDATE studio_character_outfits SET "
+                     (string-join sets ", ")
+                     ", updated_at = ? WHERE id = ? AND character_id = ?
+                       AND archived_at IS NULL")
+                    (append values (list now outfit-id character-id)))
+                  (and (> (dbi-affected-rows db) 0)
+                       (outfit-by-id db workplace-id character-id outfit-id))))))))))
+
+(define (studio-archive-character-outfit! config workplace-id character-id outfit-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((outfit (outfit-by-id db workplace-id character-id outfit-id)))
+            (and outfit
+                 (let* ((now (studio-now))
+                        (was-default? (assoc-ref outfit 'is_default)))
+                   (query db "UPDATE studio_character_outfits
+                                 SET archived_at = ?, updated_at = ?, is_default = 0
+                               WHERE id = ? AND character_id = ? AND archived_at IS NULL"
+                          now now outfit-id character-id)
+                   (when (and was-default? (> (dbi-affected-rows db) 0))
+                     (query db
+                            "SELECT id FROM studio_character_outfits
+                              WHERE character_id = ? AND archived_at IS NULL
+                              ORDER BY created_at ASC, id ASC LIMIT 1"
+                            character-id)
+                     (let ((row (dbi-get_row db)))
+                       (when row
+                         (query db "UPDATE studio_character_outfits
+                                       SET is_default = 1, updated_at = ?
+                                     WHERE id = ?"
+                                now (row-value row "id")))))
+                   `((id . ,outfit-id)
+                     (character_id . ,character-id)
+                     (archived_at . ,now))))))))))
+
+(define (studio-set-default-character-outfit! config workplace-id character-id outfit-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (unless (outfit-by-id db workplace-id character-id outfit-id)
+            (throw 'studio-outfit-error 'outfit-not-found))
+          (let ((now (studio-now)))
+            (clear-default-outfits! db character-id)
+            (query db "UPDATE studio_character_outfits
+                          SET is_default = 1, updated_at = ?
+                        WHERE id = ? AND character_id = ?"
+                   now outfit-id character-id)
+            (outfit-by-id db workplace-id character-id outfit-id)))))))
+
+(define (studio-set-character-outfit-reference! config workplace-id character-id
+                                                outfit-id asset-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (unless (outfit-by-id db workplace-id character-id outfit-id)
+            (throw 'studio-outfit-error 'outfit-not-found))
+          (query db "UPDATE studio_character_outfits
+                        SET reference_asset_id = ?, updated_at = ?
+                      WHERE id = ? AND character_id = ? AND archived_at IS NULL"
+                 (sql-value asset-id) (studio-now) outfit-id character-id)
+          (and (> (dbi-affected-rows db) 0)
+               (outfit-by-id db workplace-id character-id outfit-id)))))))
 
 (define scene-columns
   "id, workplace_id, title, summary, sort_order, status,

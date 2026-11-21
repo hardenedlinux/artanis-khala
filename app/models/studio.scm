@@ -25,6 +25,23 @@
             studio-get-character
             studio-update-character!
             studio-archive-character!
+            studio-list-character-drafts
+            studio-develop-character!
+            studio-update-character-draft!
+            studio-apply-character-draft!
+            studio-discard-character-draft!
+            studio-list-character-outfits
+            studio-create-character-outfit!
+            studio-get-character-outfit
+            studio-update-character-outfit!
+            studio-archive-character-outfit!
+            studio-set-default-character-outfit!
+            studio-set-character-outfit-reference!
+            studio-character-artwork-prompt
+            studio-list-character-artworks
+            studio-generate-character-artwork!
+            studio-set-character-avatar!
+            studio-character-canon
             studio-list-scenes
             studio-create-scene!
             studio-get-scene
@@ -89,14 +106,17 @@
 (define character-identity-specs
   '(("literary_identity"
      "background" "personality" "values" "motivations"
-     "fears" "goals" "arc")
+     "fears" "goals" "relationships" "arc")
     ("visual_identity"
      "standard_appearance" "face" "body" "hair"
-     "clothing" "palette" "expressions" "posture")
+     "eyes" "skin" "distinctive_features" "clothing"
+     "palette" "expressions" "posture")
     ("vocal_identity"
-     "timbre" "range" "pitch" "accent" "pronunciation" "pace")
+     "voice_character" "timbre" "range" "pitch" "accent"
+     "pronunciation" "pace" "speech_habits")
     ("performance_identity"
-     "habits" "movement" "gestures" "emotional_responses" "situations")))
+     "habits" "movement" "gestures" "emotional_responses"
+     "behavioral_traits" "typical_reactions" "situations")))
 
 (define missing (list 'missing))
 
@@ -335,6 +355,7 @@
     ("name" . ,(assoc-ref character 'name))
     ("role" . ,(assoc-ref character 'role))
     ("summary" . ,(assoc-ref character 'summary))
+    ("concept" . ,(or (assoc-ref character 'concept) ""))
     ("literary_identity"
      . ,(identity-from-json (assoc-ref character 'literary_identity)))
     ("visual_identity"
@@ -343,9 +364,19 @@
      . ,(identity-from-json (assoc-ref character 'vocal_identity)))
     ("performance_identity"
      . ,(identity-from-json (assoc-ref character 'performance_identity)))
+    ("avatar_asset_id" . ,(mark (assoc-ref character 'avatar_asset_id)))
     ("created_at" . ,(assoc-ref character 'created_at))
     ("updated_at" . ,(assoc-ref character 'updated_at))
     ("archived_at" . ,(mark (assoc-ref character 'archived_at)))))
+
+(define (public-character-with-avatar config character)
+  (let* ((avatar-id (assoc-ref character 'avatar_asset_id))
+         (workplace-id (assoc-ref character 'workplace_id))
+         (asset (and avatar-id
+                     (db:studio-get-asset config workplace-id avatar-id))))
+    (append (public-character character)
+            `(("avatar" . ,(mark (and asset
+                                      (public-asset asset #:config config))))))))
 
 (define (public-scene scene)
   `(("id" . ,(assoc-ref scene 'id))
@@ -536,7 +567,8 @@
 
 (define (studio-list-characters config workplace-id)
   (let ((workplace (require-workplace config workplace-id)))
-    (map public-character
+    (map (lambda (character)
+           (public-character-with-avatar config character))
          (db:studio-list-characters config (assoc-ref workplace 'id)))))
 
 (define (studio-create-character! config workplace-id body)
@@ -548,18 +580,22 @@
                              #:default "" #:max max-character-role-length))
          (summary (string-field body "summary" #:allow-empty #t
                                 #:default "" #:max max-description-length))
+         (concept (string-field body "concept" #:allow-empty #t
+                                #:default "" #:max max-description-length))
          (literary (identity-from-body body "literary_identity"))
          (visual (identity-from-body body "visual_identity"))
          (vocal (identity-from-body body "vocal_identity"))
          (performance (identity-from-body body "performance_identity")))
     (public-character
      (db:studio-create-character! config (db:studio-new-id) wid name role
-                                  summary literary visual vocal performance))))
+                                  summary literary visual vocal performance
+                                  #:concept concept))))
 
 (define (studio-get-character config workplace-id character-id)
   (let* ((workplace (require-workplace config workplace-id))
          (wid (assoc-ref workplace 'id)))
-    (public-character (require-character config wid character-id))))
+    (public-character-with-avatar
+     config (require-character config wid character-id))))
 
 (define (studio-update-character! config workplace-id character-id body)
   (let* ((workplace (require-workplace config workplace-id))
@@ -582,6 +618,12 @@
             (acons 'summary (string-field body "summary" #:allow-empty #t
                                           #:default "" #:max max-description-length)
                    updates)))
+    (when (object-has? body "concept")
+      (set! updates
+            (acons 'concept (string-field body "concept" #:allow-empty #t
+                                          #:default ""
+                                          #:max max-description-length)
+                   updates)))
     (for-each
      (lambda (key)
        (when (object-has? body key)
@@ -594,8 +636,9 @@
      '("literary_identity" "visual_identity"
        "vocal_identity" "performance_identity"))
     (if (null? updates)
-        (public-character character)
-        (public-character
+        (public-character-with-avatar config character)
+        (public-character-with-avatar
+         config
          (or (db:studio-update-character! config wid cid updates)
              (api-fail 404 "NOT_FOUND" "Character not found"))))))
 
@@ -610,6 +653,820 @@
     `(("id" . ,cid)
       ("workplace_id" . ,wid)
       ("archived_at" . ,archived))))
+
+;; Character Studio: AI proposals are drafts. Only the explicit apply step
+;; writes an identity section onto studio_characters. Outfits and artwork keep
+;; their own author-controlled approval pointers.
+(define character-section-order
+  '("literary_identity" "visual_identity"
+    "vocal_identity" "performance_identity"))
+
+(define character-artwork-specs
+  '(("avatar" "portrait" 768 768
+     "Head-and-shoulders portrait. The face is the focal point, with a calm editorial background and enough negative space for a character index card.")
+    ("full_body" "full body" 768 1024
+     "Full-body standing character study. Show the complete silhouette, posture, hands and footwear without cropping the figure.")
+    ("character_sheet" "character sheet" 1024 1024
+     "Production character sheet on a restrained paper background: one clear full-body turn, a smaller three-quarter view, face details, colour swatches and concise visual-canon notes.")
+    ("expression_sheet" "expression sheet" 1024 768
+     "Expression reference sheet arranged as a clean grid of six subtle facial expressions, keeping the same face, hair, age and identity in every panel.")
+    ("outfit" "outfit artwork" 768 1024
+     "Full-length outfit design plate. Emphasise the garments, materials, construction, accessories and how the outfit sits on this specific body. Keep the character's face and hair canonical.")))
+
+(define (character-section-key value)
+  (let* ((raw (string-downcase (or value "")))
+         (key (cond ((member raw character-section-order string=?) raw)
+                    ((equal? raw "literary") "literary_identity")
+                    ((equal? raw "visual") "visual_identity")
+                    ((equal? raw "vocal") "vocal_identity")
+                    ((equal? raw "performance") "performance_identity")
+                    (else #f))))
+    (or key
+        (api-fail 404 "NOT_FOUND" "Character identity section not found"))))
+
+(define (character-boolean-field body key)
+  (cond ((not (object-has? body key)) #f)
+        ((boolean? (object-ref body key)) (object-ref body key))
+        (else (api-fail 400 "VALIDATION_ERROR"
+                        (format #f "~a must be a boolean" key)))))
+
+(define (character-draft-json value)
+  (if (or (not value) (null? value))
+      "{}"
+      (identity-to-json value)))
+
+(define (public-character-draft draft)
+  `(("section" . ,(assoc-ref draft 'section))
+    ("content" . ,(identity-from-json (assoc-ref draft 'content)))
+    ("source" . ,(assoc-ref draft 'source))
+    ("model" . ,(assoc-ref draft 'model))
+    ("author_edited" . ,(and (assoc-ref draft 'author_edited) #t))
+    ("created_at" . ,(assoc-ref draft 'created_at))
+    ("updated_at" . ,(assoc-ref draft 'updated_at))))
+
+(define (public-character-drafts drafts)
+  (map public-character-draft drafts))
+
+(define (character-draft-map drafts)
+  (map (lambda (draft)
+         (cons (assoc-ref draft 'section) draft))
+       drafts))
+
+(define (strip-json-fence text)
+  (let* ((trimmed (string-trim-both text))
+         (without-open
+          (if (string-prefix? "```" trimmed)
+              (let ((newline (string-index trimmed #\newline)))
+                (if newline (substring trimmed (+ newline 1))
+                    (substring trimmed 3)))
+              trimmed))
+         (without-close
+          (if (string-suffix? "```" without-open)
+              (substring without-open 0 (- (string-length without-open) 3))
+              without-open)))
+    (string-trim-both without-close)))
+
+(define (character-ai-fail message)
+  (api-fail 502 "INVALID_CHARACTER_OUTPUT" message))
+
+(define (character-ai-object text label)
+  (unless (string? text)
+    (character-ai-fail (format #f "~a returned no JSON" label)))
+  (catch #t
+    (lambda ()
+      (let ((value (json-string->scm (strip-json-fence text))))
+        (unless (object? value)
+          (character-ai-fail (format #f "~a must be a JSON object" label)))
+        value))
+    (lambda (key . args)
+      (if (eq? key 'studio-api-error)
+          (apply throw key args)
+          (character-ai-fail (format #f "~a returned invalid JSON" label))))))
+
+(define (character-ai-object-fields object label allowed)
+  (unless (object? object)
+    (character-ai-fail (format #f "~a must be a JSON object" label)))
+  (for-each
+   (lambda (entry)
+     (unless (member (car entry) allowed)
+       (character-ai-fail
+        (format #f "~a.~a is not supported" label (car entry)))))
+   object))
+
+(define (character-ai-field-value section key value)
+  (unless (string? value)
+    (character-ai-fail
+     (format #f "~a.~a must be a string" section key)))
+  (when (> (string-length value) max-identity-field-length)
+    (character-ai-fail
+     (format #f "~a.~a is too large" section key)))
+  (string-trim-both value))
+
+(define (character-ai-section section value)
+  (let ((fields (identity-fields section)))
+    (character-ai-object-fields value section fields)
+    (let ((result
+           (map (lambda (entry)
+                  (cons (car entry)
+                        (character-ai-field-value section (car entry) (cdr entry))))
+                value)))
+      (unless (any (lambda (entry)
+                     (not (string-null? (cdr entry))))
+                   result)
+        (character-ai-fail
+         (format #f "~a must contain at least one identity field" section)))
+      result)))
+
+(define (character-input-section section value)
+  (unless (or (null? value) (object? value))
+    (api-fail 400 "VALIDATION_ERROR"
+              (format #f "~a content must be an object" section)))
+  (let ((fields (identity-fields section)))
+    (for-each
+     (lambda (entry)
+       (unless (member (car entry) fields)
+         (api-fail 400 "VALIDATION_ERROR"
+                   (format #f "~a.~a is not supported" section (car entry))))
+       (unless (string? (cdr entry))
+         (api-fail 400 "VALIDATION_ERROR"
+                   (format #f "~a.~a must be a string" section (car entry))))
+       (when (> (string-length (cdr entry)) max-identity-field-length)
+         (api-fail 400 "VALIDATION_ERROR"
+                   (format #f "~a.~a is too large" section (car entry)))))
+     value)
+    value))
+
+(define (character-ai-full-identities text)
+  (let ((root (character-ai-object text "The Character Development response")))
+    (character-ai-object-fields root "character" character-section-order)
+    (for-each
+     (lambda (section)
+       (unless (object-has? root section)
+         (character-ai-fail
+          (format #f "The Character Development response is missing ~a" section))))
+     character-section-order)
+    (map (lambda (section)
+           (cons section (character-ai-section section (object-ref root section))))
+         character-section-order)))
+
+(define (character-ai-section-identity section text)
+  (let ((root (character-ai-object
+               text (format #f "The ~a response" section))))
+    (cons section (character-ai-section section root))))
+
+(define (character-canon-identity character section)
+  (identity-from-json
+   (assoc-ref character (string->symbol section))))
+
+(define (character-drop-locked-fields section incoming current)
+  (filter (lambda (entry)
+            (let ((locked (assoc-ref current (car entry))))
+              (or (not (string? locked))
+                  (string-null? (string-trim-both locked)))))
+          incoming))
+
+(define (character-ai-identity-lines character section)
+  (let* ((identity (character-canon-identity character section))
+         (fields (identity-fields section))
+         (lines
+          (filter-map
+           (lambda (field)
+             (let ((value (assoc-ref identity field)))
+               (and (string? value)
+                    (not (string-null? (string-trim-both value)))
+                    (format #f "- ~a: ~a" field (string-trim-both value)))))
+           fields)))
+    (if (null? lines) "- not yet specified" (string-join lines "\n"))))
+
+(define (character-ai-context character)
+  (format #f
+          "NAME: ~a\nROLE: ~a\nSUMMARY: ~a\nCONCEPT: ~a\n\nAPPROVED CANON — LOCKED\n[literary_identity]\n~a\n[visual_identity]\n~a\n[vocal_identity]\n~a\n[performance_identity]\n~a"
+          (assoc-ref character 'name)
+          (or (assoc-ref character 'role) "")
+          (or (assoc-ref character 'summary) "")
+          (or (assoc-ref character 'concept) "")
+          (character-ai-identity-lines character "literary_identity")
+          (character-ai-identity-lines character "visual_identity")
+          (character-ai-identity-lines character "vocal_identity")
+          (character-ai-identity-lines character "performance_identity")))
+
+(define (character-development-prompt character body section)
+  (let* ((concept (optional-string-field body "concept"
+                                          #:max max-description-length))
+         (instruction (optional-string-field body "instruction"
+                                             #:max max-instruction-length))
+         (field-lines
+          (string-join
+           (map (lambda (entry)
+                  (format #f "- ~a: ~a"
+                          (car entry) (string-join (cdr entry) ", ")))
+                character-identity-specs)
+           "\n"))
+         (concept-text (if (string-null? concept)
+                           (or (assoc-ref character 'concept) "")
+                           concept)))
+    (if section
+        (format #f
+                "KHALA_CHARACTER_SECTION: ~a\n\nDevelop only the ~a section for this existing Character Studio character.\n\nAUTHOR CONCEPT\n~a\n\nAUTHOR NOTES\n~a\n\n~a\n\nREQUIRED FIELDS FOR THIS SECTION\n~a\n\nReturn exactly one JSON object whose keys are the requested field names and whose values are concise, concrete strings. Do not wrap the JSON in Markdown. Never contradict locked canon. Leave details not implied by the concept open to interpretation rather than inventing plot events."
+                section section
+                (if (string-null? concept-text) "(not supplied)" concept-text)
+                (if (string-null? instruction) "(none)" instruction)
+                (character-ai-context character)
+                (string-join (identity-fields section) ", "))
+        (format #f
+                "KHALA_CHARACTER_DEVELOP\n\nBuild a complete, production-ready Character Studio profile from the author's concept and the already approved canon.\n\nAUTHOR CONCEPT\n~a\n\nAUTHOR NOTES\n~a\n\n~a\n\nALLOWED FIELDS PER SECTION\n~a\n\nReturn exactly one JSON object with the keys literary_identity, visual_identity, vocal_identity and performance_identity. Each value must be an object containing only the allowed field names for that section. Every value must be a concise string. Do not wrap the JSON in Markdown. Locked canon values are immutable; do not repeat or alter them. AI may fill missing details, but must never claim a suggested event already happened."
+                (if (string-null? concept-text) "(not supplied)" concept-text)
+                (if (string-null? instruction) "(none)" instruction)
+                (character-ai-context character)
+                field-lines))))
+
+(define (character-run-development-ai config character body section)
+  (let* ((model (resolve-model config body))
+         (prepared
+          `((model . ,model)
+            (engine . ,(resolve-engine config))
+            (messages
+             . ,(list
+                 `(("role" . "system")
+                   ("content" . ,(read-prompt
+                                  (if section
+                                      "character-section.md"
+                                      "character-develop.md"))))
+                 `(("role" . "user")
+                   ("content" . ,(character-development-prompt
+                                  character body section)))))
+            (options . (("temperature" . 0.7)
+                        ("num_predict" . 4096))))))
+    (catch #t
+      (lambda ()
+        (let* ((result (studio-run-ai prepared))
+               (text (or (assoc-ref result 'text)
+                         (assoc-ref result "text")
+                         "")))
+          (list model text)))
+      (lambda (key . args)
+        (if (eq? key 'studio-api-error)
+            (apply throw key args)
+            (begin
+              (format (current-error-port)
+                      "Character development generation failed: ~s ~s~%"
+                      key args)
+              (api-fail 502 "GENERATION_FAILED"
+                        "Character development generation failed")))))))
+
+(define (studio-list-character-drafts config workplace-id character-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id)))
+    (public-character-drafts
+     (db:studio-list-character-drafts config wid (assoc-ref character 'id)))))
+
+(define (studio-develop-character! config workplace-id character-id body section)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (section (and section (character-section-key section)))
+         (requested (if section (list section) character-section-order))
+         (force (character-boolean-field body "force"))
+         (existing (db:studio-list-character-drafts config wid cid))
+         (edited
+          (filter (lambda (draft)
+                    (and (member (assoc-ref draft 'section) requested string=?)
+                         (assoc-ref draft 'author_edited)))
+                  existing)))
+    (when (and (pair? edited) (not force))
+      (api-fail 409 "DRAFT_PROTECTED"
+                "AI regeneration would overwrite an author-edited draft"
+                (cons "sections"
+                      (map (lambda (draft) (assoc-ref draft 'section)) edited))))
+    (let* ((model/text (character-run-development-ai
+                        config character body section))
+           (model (car model/text))
+           (text (cadr model/text))
+           (identities
+            (if section
+                (list (character-ai-section-identity section text))
+                (character-ai-full-identities text))))
+      (for-each
+       (lambda (entry)
+         (let* ((key (car entry))
+                (incoming (cdr entry))
+                (current (character-canon-identity character key))
+                (filtered (character-drop-locked-fields key incoming current)))
+           (db:studio-save-character-draft!
+            config wid cid key (character-draft-json filtered)
+            "ai" model #f)))
+       identities)
+      (let ((saved (db:studio-list-character-drafts config wid cid)))
+        (public-character-drafts
+         (if section
+             (filter (lambda (draft)
+                       (equal? (assoc-ref draft 'section) section))
+                     saved)
+             saved))))))
+
+(define (studio-update-character-draft! config workplace-id character-id
+                                        section body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (key (character-section-key section)))
+    (unless (object-has? body "content")
+      (api-fail 400 "VALIDATION_ERROR" "content is required"))
+    (let* ((incoming (object-ref body "content"))
+           (validated (character-input-section key incoming)))
+      (public-character-draft
+       (db:studio-save-character-draft!
+        config wid cid key (character-draft-json validated)
+        "author" "" #t)))))
+
+(define (studio-apply-character-draft! config workplace-id character-id section)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (key (character-section-key section))
+         (draft (db:studio-get-character-draft config wid cid key)))
+    (unless draft
+      (api-fail 404 "NOT_FOUND" "Character draft not found"))
+    (let* ((incoming (identity-from-json (assoc-ref draft 'content)))
+           (current (character-canon-identity character key))
+           (merged (merge-identity key current incoming)))
+      (public-character-with-avatar
+       config
+       (db:studio-apply-character-draft!
+        config wid cid key (identity-to-json merged))))))
+
+(define (studio-discard-character-draft! config workplace-id character-id section)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (key (character-section-key section))
+         (removed (db:studio-delete-character-draft! config wid cid key)))
+    (unless removed
+      (api-fail 404 "NOT_FOUND" "Character draft not found"))
+    `(("character_id" . ,cid)
+      ("section" . ,key)
+      ("removed" . #t))))
+
+(define (json-string-list text)
+  (if (or (not (string? text)) (string-null? text))
+      '()
+      (catch #t
+        (lambda ()
+          (let ((value (json-string->scm text)))
+            (cond ((vector? value) (vector->list value))
+                  ((list? value) value)
+                  (else '()))))
+        (lambda _ '()))))
+
+(define (string-list-json values)
+  (json-encode (json-normalize (if (list? values) values '()))))
+
+(define (character-string-list-field body key label default)
+  (if (not (object-has? body key))
+      (string-list-json default)
+      (let ((values (json-array-values (object-ref body key) label)))
+        (when (> (length values) 64)
+          (api-fail 400 "VALIDATION_ERROR"
+                    (format #f "~a has too many entries" label)))
+        (let loop ((rest values) (result '()))
+          (if (null? rest)
+              (string-list-json (reverse result))
+              (let ((value (car rest)))
+                (unless (string? value)
+                  (api-fail 400 "VALIDATION_ERROR"
+                            (format #f "~a entries must be strings" label)))
+                (when (> (string-length value) 1000)
+                  (api-fail 400 "VALIDATION_ERROR"
+                            (format #f "~a entry is too large" label)))
+                (let ((value (string-trim-both value)))
+                  (loop (cdr rest)
+                        (if (string-null? value)
+                            result
+                            (cons value result))))))))))
+
+(define character-outfit-kinds
+  '("standard" "casual" "battle" "formal" "custom"))
+
+(define (character-outfit-kind-field body default)
+  (let ((kind (string-field body "kind" #:allow-empty #t
+                            #:default default #:max 32)))
+    (unless (member kind character-outfit-kinds)
+      (api-fail 400 "VALIDATION_ERROR" "kind is not supported"))
+    kind))
+
+(define (character-outfit-values body create?)
+  (let ((values '()))
+    (when (or create? (object-has? body "name"))
+      (set! values
+            (acons 'name (string-field body "name" #:required #t
+                                       #:max max-title-length)
+                   values)))
+    (when (or create? (object-has? body "kind"))
+      (set! values
+            (acons 'kind (character-outfit-kind-field body "custom") values)))
+    (when (or create? (object-has? body "description"))
+      (set! values
+            (acons 'description
+                   (string-field body "description" #:allow-empty #t
+                                 #:default ""
+                                 #:max max-description-length)
+                   values)))
+    (for-each
+     (lambda (entry)
+       (when (or create? (object-has? body (car entry)))
+         (set! values
+               (acons (string->symbol (car entry))
+                      (character-string-list-field body (car entry)
+                                                   (cadr entry) '())
+                      values))))
+     '(("components" "components") ("materials" "materials")
+       ("colors" "colors") ("accessories" "accessories")
+       ("special_features" "special_features")))
+    (when (or create? (object-has? body "image_prompt"))
+      (set! values
+            (acons 'image_prompt
+                   (string-field body "image_prompt" #:allow-empty #t
+                                 #:default "" #:max 14000)
+                   values)))
+    (when (object-has? body "is_default")
+      (set! values
+            (acons 'is_default (character-boolean-field body "is_default")
+                   values)))
+    (when (object-has? body "reference_asset_id")
+      (let ((asset-id (object-ref body "reference_asset_id")))
+        (unless (or (not asset-id) (valid-uuid? asset-id))
+          (api-fail 400 "VALIDATION_ERROR"
+                    "reference_asset_id must be a UUID or null"))
+        (set! values
+              (acons 'reference_asset_id
+                     (and asset-id (string-downcase asset-id)) values))))
+    values))
+
+(define (public-character-outfit outfit)
+  `(("id" . ,(assoc-ref outfit 'id))
+    ("character_id" . ,(assoc-ref outfit 'character_id))
+    ("name" . ,(assoc-ref outfit 'name))
+    ("kind" . ,(assoc-ref outfit 'kind))
+    ("description" . ,(assoc-ref outfit 'description))
+    ("components" . ,(json-string-list (assoc-ref outfit 'components)))
+    ("materials" . ,(json-string-list (assoc-ref outfit 'materials)))
+    ("colors" . ,(json-string-list (assoc-ref outfit 'colors)))
+    ("accessories" . ,(json-string-list (assoc-ref outfit 'accessories)))
+    ("special_features"
+     . ,(json-string-list (assoc-ref outfit 'special_features)))
+    ("image_prompt" . ,(assoc-ref outfit 'image_prompt))
+    ("reference_asset_id" . ,(mark (assoc-ref outfit 'reference_asset_id)))
+    ("is_default" . ,(and (assoc-ref outfit 'is_default) #t))
+    ("created_at" . ,(assoc-ref outfit 'created_at))
+    ("updated_at" . ,(assoc-ref outfit 'updated_at))
+    ("archived_at" . ,(mark (assoc-ref outfit 'archived_at)))))
+
+(define (studio-list-character-outfits config workplace-id character-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id)))
+    (map public-character-outfit
+         (db:studio-list-character-outfits config wid
+                                          (assoc-ref character 'id)))))
+
+(define (studio-get-character-outfit config workplace-id character-id outfit-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (id (require-uuid-in-path outfit-id "Outfit"))
+         (outfit (db:studio-get-character-outfit
+                  config wid (assoc-ref character 'id) id)))
+    (or (and outfit (public-character-outfit outfit))
+        (api-fail 404 "NOT_FOUND" "Outfit not found"))))
+
+(define (studio-create-character-outfit! config workplace-id character-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (values (character-outfit-values body #t)))
+    (when (assoc 'reference_asset_id values)
+      (require-character-image-asset config wid cid
+                                     (assoc-ref values 'reference_asset_id)))
+    (public-character-outfit
+     (db:studio-create-character-outfit!
+      config (db:studio-new-id) wid cid values))))
+
+(define (studio-update-character-outfit! config workplace-id character-id
+                                         outfit-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (id (require-uuid-in-path outfit-id "Outfit"))
+         (outfit (db:studio-get-character-outfit config wid cid id)))
+    (unless outfit (api-fail 404 "NOT_FOUND" "Outfit not found"))
+    (let ((values (character-outfit-values body #f)))
+      (when (assoc 'reference_asset_id values)
+        (when (assoc-ref values 'reference_asset_id)
+          (require-character-image-asset config wid cid
+                                         (assoc-ref values 'reference_asset_id))))
+      (public-character-outfit
+       (db:studio-update-character-outfit! config wid cid id values)))))
+
+(define (studio-archive-character-outfit! config workplace-id character-id outfit-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (id (require-uuid-in-path outfit-id "Outfit")))
+    (or (db:studio-archive-character-outfit! config wid cid id)
+        (api-fail 404 "NOT_FOUND" "Outfit not found"))))
+
+(define (studio-set-default-character-outfit! config workplace-id character-id
+                                              outfit-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (id (require-uuid-in-path outfit-id "Outfit"))
+         (outfit (db:studio-set-default-character-outfit! config wid cid id)))
+    (if outfit
+        (public-character-outfit outfit)
+        (api-fail 404 "NOT_FOUND" "Outfit not found"))))
+
+(define (character-linked-image-asset config wid cid asset-id)
+  (let ((asset (db:studio-get-asset config wid asset-id)))
+    (unless asset
+      (api-fail 404 "NOT_FOUND" "Asset not found"))
+    (unless (equal? (assoc-ref asset 'asset_type) "image")
+      (api-fail 422 "INVALID_ASSET" "The selected Asset is not an image"))
+    (unless (find (lambda (entry) (equal? (assoc-ref entry 'id) asset-id))
+                  (db:studio-list-linked-assets config wid "character" cid))
+      (api-fail 422 "ASSET_NOT_LINKED"
+                "The selected image is not linked to this Character"))
+    asset))
+
+(define (require-character-image-asset config wid cid asset-id)
+  (and asset-id
+       (character-linked-image-asset config wid cid
+                                     (require-uuid-in-path asset-id "Asset"))))
+
+(define (character-artwork-spec type)
+  (or (assoc type character-artwork-specs)
+      (api-fail 400 "VALIDATION_ERROR" "artwork_type is not supported")))
+
+(define (character-artwork-type body)
+  (let ((value (string-field body "artwork_type" #:required #t #:max 32)))
+    (or (assoc value character-artwork-specs)
+        (api-fail 400 "VALIDATION_ERROR" "artwork_type is not supported"))))
+
+(define (character-default-outfit config wid cid)
+  (let ((outfits (db:studio-list-character-outfits config wid cid)))
+    (or (find (lambda (outfit) (assoc-ref outfit 'is_default)) outfits)
+        (and (pair? outfits) (car outfits)))))
+
+(define (character-selected-outfit config wid cid body require?)
+  (let ((requested (object-ref body "outfit_id")))
+    (cond
+     ((and (object-has? body "outfit_id") requested)
+      (let* ((id (require-uuid-in-path requested "Outfit"))
+             (outfit (db:studio-get-character-outfit config wid cid id)))
+        (or outfit (api-fail 404 "NOT_FOUND" "Outfit not found"))))
+     (require?
+      (or (character-default-outfit config wid cid)
+          (api-fail 422 "OUTFIT_REQUIRED"
+                    "Choose or create an Outfit before generating this artwork")))
+     (else (character-default-outfit config wid cid)))))
+
+(define (character-identity-lines identity fields)
+  (let ((lines
+         (filter-map
+          (lambda (field)
+            (let ((value (assoc-ref identity field)))
+              (and (string? value)
+                   (not (string-null? (string-trim-both value)))
+                   (format #f "- ~a: ~a" field (string-trim-both value)))))
+          fields)))
+    (if (null? lines) "- not yet specified" (string-join lines "\n"))))
+
+(define (character-outfit-prompt-lines outfit)
+  (format #f
+          "NAME: ~a\nKIND: ~a\nDESCRIPTION: ~a\n- components: ~a\n- materials: ~a\n- colors: ~a\n- accessories: ~a\n- special features: ~a\n- design note: ~a"
+          (assoc-ref outfit 'name) (assoc-ref outfit 'kind)
+          (or (assoc-ref outfit 'description) "")
+          (string-join (json-string-list (assoc-ref outfit 'components)) ", ")
+          (string-join (json-string-list (assoc-ref outfit 'materials)) ", ")
+          (string-join (json-string-list (assoc-ref outfit 'colors)) ", ")
+          (string-join (json-string-list (assoc-ref outfit 'accessories)) ", ")
+          (string-join (json-string-list (assoc-ref outfit 'special_features)) ", ")
+          (or (assoc-ref outfit 'image_prompt) "")))
+
+(define (character-artwork-prompt-text character spec outfit extra)
+  (let* ((type (car spec))
+         (visual (character-canon-identity character "visual_identity"))
+         (literary (character-canon-identity character "literary_identity"))
+         (visual-fields (identity-fields "visual_identity"))
+         (literary-fields (identity-fields "literary_identity")))
+    (format #f
+            "~a\n\nEditorial character artwork for Khala Studio. Type: ~a.\n\nCHARACTER\nName: ~a\nRole: ~a\nSummary: ~a\n\nVISUAL CANON — authoritative; preserve face, body, hair, eyes, skin, distinguishing features and colour relationships exactly.\n~a\n\nCHARACTER PRESENCE\n~a\n\nOUTFIT\n~a\n\nCOMPOSITION\n~a\n\nADDITIONAL AUTHOR DIRECTION\n~a\n\nCONSISTENCY RULES\nKeep the same Character identity across all images. Change only pose, expression, framing, lighting and the selected outfit. Do not invent permanent scars, prosthetics, tattoos, clothing changes or other canon alterations. No text artifacts. No neon, glow, gradients or cyberpunk styling. Warm paper, leather and editorial studio atmosphere."
+            (read-prompt "character-artwork.md")
+            (cadr spec)
+            (assoc-ref character 'name)
+            (or (assoc-ref character 'role) "")
+            (or (assoc-ref character 'summary) "")
+            (character-identity-lines visual visual-fields)
+            (character-identity-lines literary literary-fields)
+            (if outfit (character-outfit-prompt-lines outfit)
+                "- no Outfit selected; use only the approved visual canon")
+            (cadddr (cdr spec))
+            (if (string-null? extra) "(none)" extra))))
+
+(define (studio-character-artwork-prompt config workplace-id character-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (spec (character-artwork-type body))
+         (type (car spec))
+         (outfit (character-selected-outfit config wid cid body
+                                             (equal? type "outfit")))
+         (extra (optional-string-field body "extra_description" #:max 8000))
+         (prompt (character-artwork-prompt-text character spec outfit extra)))
+    `(("character_id" . ,cid)
+      ("artwork_type" . ,type)
+      ("outfit_id" . ,(mark (and outfit (assoc-ref outfit 'id))))
+      ("prompt" . ,prompt)
+      ("width" . ,(caddr spec))
+      ("height" . ,(cadddr spec)))))
+
+(define (studio-list-character-artworks config workplace-id character-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id)))
+    (map (lambda (asset) (public-asset asset #:config config))
+         (filter (lambda (asset)
+                   (equal? (assoc-ref asset 'asset_type) "image"))
+                 (db:studio-list-linked-assets config wid "character" cid)))))
+
+(define (character-artwork-seed)
+  (+ (current-time) (random 1000000)))
+
+(define (studio-generate-character-artwork! config workplace-id character-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (spec (character-artwork-type body))
+         (type (car spec))
+         (outfit (character-selected-outfit config wid cid body
+                                             (equal? type "outfit")))
+         (extra (optional-string-field body "extra_description" #:max 8000))
+         (prompt (if (object-has? body "prompt")
+                     (string-field body "prompt" #:required #t #:max 20000)
+                     (character-artwork-prompt-text character spec outfit extra)))
+         (width (caddr spec))
+         (height (cadddr spec)))
+    (unless (image-generation-available? config)
+      (api-fail 503 "IMAGE_SERVICE_UNAVAILABLE"
+                "Image generation is not available in this environment"))
+    (let* ((pngs
+            (catch #t
+              (lambda ()
+                (comfy-render-image! config prompt width height
+                                     (character-artwork-seed)))
+              (lambda (key . args)
+                (format (current-error-port)
+                        "Character artwork generation failed: ~s ~s~%" key args)
+                (api-fail 502 "GENERATION_FAILED"
+                          "Image generation failed; Character Canon was not changed"))))
+           (_ (unless (and (pair? pngs)
+                           (bytevector? (car pngs))
+                           (> (bytevector-length (car pngs)) 0))
+                (api-fail 502 "GENERATION_FAILED"
+                          "Image generation returned no image")))
+           (png (car pngs))
+           (asset-id (db:studio-new-id))
+           (filename (format #f "character-~a-~a.png" type asset-id))
+           (storage-key #f))
+      (catch #t
+        (lambda ()
+          (let* ((validated
+                  (fs:studio-asset-validate-upload
+                   config filename "image/png" png "image"))
+                 (extension (assoc-ref validated 'extension))
+                 (key (fs:studio-asset-storage-key asset-id extension))
+                 (checksum (fs:studio-asset-store-file! config key png))
+                 (metadata
+                  (json-encode
+                   (json-normalize
+                    `(("artwork_type" . ,type)
+                      ("character_id" . ,cid)
+                      ("outfit_id" . ,(mark (and outfit (assoc-ref outfit 'id))))
+                      ("engine" . ,(configured-engine config))
+                      ("model" . ,(or (configured-model config)
+                                      (configured-engine config)))
+                      ("provider" . "moss-image")
+                      ("adapter" . "engine-run-t2i")
+                      ("prompt" . ,prompt)
+                      ("width" . ,width)
+                      ("height" . ,height)))))
+                 (name (format #f "~a — ~a"
+                               (assoc-ref character 'name)
+                               (cadr spec)))
+                 (values
+                  `((name . ,name)
+                    (description
+                     . ,(format #f "Generated ~a artwork for ~a."
+                                (cadr spec) (assoc-ref character 'name)))
+                    (asset_type . "image")
+                    (storage_key . ,key)
+                    (original_filename . ,filename)
+                    (mime_type . "image/png")
+                    (file_size . ,(bytevector-length png))
+                    (checksum . ,checksum)
+                    (source . "generated")
+                    (width . ,width)
+                    (height . ,height)
+                    (duration_ms . #f)
+                    (author . "Khala Studio")
+                    (notes . ,(or (and outfit (assoc-ref outfit 'name)) ""))
+                    (generation_metadata . ,metadata)
+                    (tags . ("character" "artwork" ,type)))))
+            (set! storage-key key)
+            (let* ((asset (db:studio-create-asset! config asset-id wid values))
+                   (_ (db:studio-add-asset-link! config wid asset-id
+                                                 "character" cid))
+                   (public (public-asset asset #:config config)))
+              `(("character_id" . ,cid)
+                ("artwork_type" . ,type)
+                ("outfit_id" . ,(mark (and outfit (assoc-ref outfit 'id))))
+                ("prompt" . ,prompt)
+                ("asset" . ,public)))))
+        (lambda (key . args)
+          (when storage-key
+            (catch #t
+              (lambda () (fs:studio-asset-delete-file! config storage-key))
+              (lambda _ #f)))
+          (if (eq? key 'studio-api-error)
+              (apply throw key args)
+              (begin
+                (format (current-error-port)
+                        "Character artwork persistence failed: ~s ~s~%" key args)
+                (api-fail 502 "GENERATION_FAILED"
+                          "The generated artwork could not be saved"))))))))
+
+(define (studio-set-character-avatar! config workplace-id character-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (asset-id (string-field body "asset_id" #:required #t #:max 36)))
+    (require-character-image-asset config wid cid asset-id)
+    (public-character-with-avatar
+     config
+     (db:studio-set-character-avatar! config wid cid
+                                      (string-downcase asset-id)))))
+
+(define (studio-set-character-outfit-reference! config workplace-id character-id
+                                                outfit-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (id (require-uuid-in-path outfit-id "Outfit"))
+         (outfit (db:studio-get-character-outfit config wid cid id))
+         (asset-id (string-field body "asset_id" #:required #t #:max 36)))
+    (unless outfit (api-fail 404 "NOT_FOUND" "Outfit not found"))
+    (require-character-image-asset config wid cid asset-id)
+    (or (and (db:studio-set-character-outfit-reference!
+              config wid cid id (string-downcase asset-id))
+             (public-character-outfit
+              (db:studio-get-character-outfit config wid cid id)))
+        (api-fail 404 "NOT_FOUND" "Outfit not found"))))
+
+(define (studio-character-canon config workplace-id character-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (avatar-id (assoc-ref character 'avatar_asset_id))
+         (avatar (and avatar-id (db:studio-get-asset config wid avatar-id))))
+    `(("character" . ,(public-character character))
+      ("avatar" . ,(mark (and avatar (public-asset avatar #:config config))))
+      ("outfits" . ,(map public-character-outfit
+                         (db:studio-list-character-outfits config wid cid)))
+      ("drafts" . ,(public-character-drafts
+                    (db:studio-list-character-drafts config wid cid))))))
 
 (define (require-object-fields object key allowed)
   (unless (or (null? object) (object? object))

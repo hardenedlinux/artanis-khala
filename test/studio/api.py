@@ -191,6 +191,178 @@ check(
     status == 400 and json.loads(body)["error"]["code"] == "VALIDATION_ERROR",
 )
 
+studio_character = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters",
+    {
+        "name": "Sera Voss",
+        "role": "Mechanic",
+        "concept": "A young mechanic in a steampunk world who refuses to depend on anyone.",
+        "visual_identity": {"face": "A locked angular face with a burn scar."},
+    },
+    201,
+)
+studio_character_id = studio_character["id"]
+studio_base = (
+    f"/studio/api/v1/workplaces/{workplace_id}/characters/{studio_character_id}"
+)
+development = json_request(
+    "POST", f"{studio_base}/ai/develop", {"concept": studio_character["concept"]}
+)
+check(
+    "character-development-drafts",
+    len(development) == 4
+    and {draft["section"] for draft in development}
+    == {"literary_identity", "visual_identity", "vocal_identity", "performance_identity"},
+)
+visual_draft = next(
+    draft for draft in development if draft["section"] == "visual_identity"
+)
+check(
+    "character-development-respects-locked-canon",
+    "face" not in visual_draft["content"]
+    and visual_draft["content"]["standard_appearance"],
+)
+edited_draft = json_request(
+    "PUT",
+    f"{studio_base}/ai/drafts/visual_identity",
+    {"content": {"face": "Author-edited face.", "hair": "Dark hair tied back."}},
+)
+check("character-draft-edited", edited_draft["author_edited"] is True)
+status, body, _ = request(
+    "POST", f"{studio_base}/ai/develop/visual_identity", {"concept": "regenerate"}
+)
+check(
+    "character-draft-regeneration-protected",
+    status == 409 and json.loads(body)["error"]["code"] == "DRAFT_PROTECTED",
+)
+forced = json_request(
+    "POST",
+    f"{studio_base}/ai/develop/visual_identity",
+    {"concept": "regenerate", "force": True},
+)
+check("character-draft-force-regenerated", len(forced) == 1)
+applied = json_request("POST", f"{studio_base}/ai/drafts/visual_identity/apply")
+check(
+    "character-draft-applied-to-canon",
+    applied["visual_identity"]["face"] == "A locked angular face with a burn scar."
+    and applied["visual_identity"]["standard_appearance"],
+)
+remaining_drafts = json_request("GET", f"{studio_base}/ai/drafts")
+check(
+    "character-applied-draft-removed",
+    all(draft["section"] != "visual_identity" for draft in remaining_drafts),
+)
+
+first_outfit = json_request(
+    "POST",
+    f"{studio_base}/outfits",
+    {
+        "name": "Standard Outfit",
+        "kind": "standard",
+        "description": "Workwear with a reinforced apron.",
+        "components": ["long coat", "work trousers"],
+        "materials": ["waxed canvas", "leather"],
+        "colors": ["charcoal", "brass"],
+        "accessories": ["brass thumb guard"],
+    },
+    201,
+)
+second_outfit = json_request(
+    "POST",
+    f"{studio_base}/outfits",
+    {"name": "Casual Outfit", "kind": "casual", "is_default": True},
+    201,
+)
+outfits = json_request("GET", f"{studio_base}/outfits")
+check(
+    "character-outfits-created",
+    len(outfits) == 2
+    and next(item for item in outfits if item["id"] == second_outfit["id"])["is_default"]
+    and not next(item for item in outfits if item["id"] == first_outfit["id"])["is_default"],
+)
+defaulted = json_request(
+    "POST", f"{studio_base}/outfits/{first_outfit['id']}/default"
+)
+check("character-outfit-default-explicit", defaulted["is_default"] is True)
+
+prompt_result = json_request(
+    "POST",
+    f"{studio_base}/artworks/prompt",
+    {"artwork_type": "full_body", "outfit_id": first_outfit["id"]},
+)
+check(
+    "character-artwork-prompt-composed",
+    "A locked angular face with a burn scar." in prompt_result["prompt"]
+    and "long coat" in prompt_result["prompt"]
+    and "charcoal" in prompt_result["prompt"],
+)
+first_artwork = json_request(
+    "POST",
+    f"{studio_base}/artworks/generate",
+    {
+        "artwork_type": "avatar",
+        "prompt": prompt_result["prompt"],
+        "extra_description": "A quiet portrait against worn paper.",
+    },
+    201,
+)
+check(
+    "character-artwork-generated",
+    first_artwork["asset"]["source"] == "generated"
+    and first_artwork["asset"]["generation_metadata"]["artwork_type"] == "avatar",
+)
+status, image_bytes, image_headers = request("GET", first_artwork["asset"]["file_url"])
+check(
+    "character-artwork-served",
+    status == 200
+    and image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    and image_headers.get("Content-Type", "").startswith("image/png"),
+)
+second_artwork = json_request(
+    "POST",
+    f"{studio_base}/artworks/generate",
+    {
+        "artwork_type": "outfit",
+        "outfit_id": first_outfit["id"],
+        "prompt": prompt_result["prompt"],
+    },
+    201,
+)
+check(
+    "character-artwork-regeneration-keeps-old",
+    second_artwork["asset"]["id"] != first_artwork["asset"]["id"],
+)
+artworks = json_request("GET", f"{studio_base}/artworks")
+check(
+    "character-artworks-linked",
+    {asset["id"] for asset in artworks}
+    == {first_artwork["asset"]["id"], second_artwork["asset"]["id"]},
+)
+avatar_character = json_request(
+    "POST", f"{studio_base}/avatar", {"asset_id": first_artwork["asset"]["id"]}
+)
+check(
+    "character-avatar-approved",
+    avatar_character["avatar_asset_id"] == first_artwork["asset"]["id"],
+)
+referenced = json_request(
+    "PUT",
+    f"{studio_base}/outfits/{first_outfit['id']}/reference",
+    {"asset_id": second_artwork["asset"]["id"]},
+)
+check(
+    "character-outfit-reference-approved",
+    referenced["reference_asset_id"] == second_artwork["asset"]["id"],
+)
+canon = json_request("GET", f"{studio_base}/canon")
+check(
+    "character-canon-view",
+    canon["avatar"]["id"] == first_artwork["asset"]["id"]
+    and canon["character"]["visual_identity"]["face"]
+    == "A locked angular face with a burn scar.",
+)
+
 other_workplace = json_request(
     "POST",
     "/studio/api/v1/workplaces",
@@ -210,6 +382,11 @@ for method, body in (("GET", None), ("PUT", {"summary": "wrong world"}), ("DELET
     )
     assert status == 404, (method, status)
 check("character-workplace-isolated-detail", True)
+status, _, _ = request(
+    "GET",
+    f"/studio/api/v1/workplaces/{other_workplace_id}/characters/{studio_character_id}/outfits",
+)
+check("character-outfit-workplace-isolated", status == 404)
 
 archived_character = json_request(
     "POST",
@@ -1098,6 +1275,10 @@ if STATE_PATH:
             {
                 "workplace_id": workplace_id,
                 "character_id": character_id,
+                "studio_character_id": studio_character_id,
+                "studio_outfit_id": first_outfit["id"],
+                "studio_avatar_asset_id": first_artwork["asset"]["id"],
+                "studio_outfit_asset_id": second_artwork["asset"]["id"],
                 "scene_id": scene_id,
                 "document_id": document_id,
                 "asset_id": asset_id,

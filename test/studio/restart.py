@@ -34,6 +34,64 @@ assert character["literary_identity"]["fears"] == "Being lost at sea.", characte
 assert character["visual_identity"]["palette"].startswith("Sea blue"), character
 print("ok studio-character-survives-restart")
 
+studio_character_url = (
+    f"http://127.0.0.1:{port}/studio/api/v1/workplaces/"
+    f"{expected['workplace_id']}/characters/{expected['studio_character_id']}"
+)
+with opener.open(studio_character_url, timeout=10) as response:
+    studio_character = json.loads(response.read())["data"]
+
+assert studio_character["name"] == "Sera Voss", studio_character
+assert studio_character["visual_identity"]["face"] == (
+    "A locked angular face with a burn scar."
+), studio_character
+assert studio_character["visual_identity"]["standard_appearance"], studio_character
+assert studio_character["avatar_asset_id"] == expected["studio_avatar_asset_id"], studio_character
+print("ok studio-character-studio-survives-restart")
+
+with opener.open(studio_character_url + "/outfits", timeout=10) as response:
+    outfits = json.loads(response.read())["data"]
+
+assert len(outfits) == 2, outfits
+outfit = next(item for item in outfits if item["id"] == expected["studio_outfit_id"])
+assert outfit["is_default"] is True, outfit
+assert outfit["colors"] == ["charcoal", "brass"], outfit
+assert outfit["components"] == ["long coat", "work trousers"], outfit
+assert outfit["reference_asset_id"] == expected["studio_outfit_asset_id"], outfit
+print("ok studio-outfits-survive-restart")
+
+with opener.open(studio_character_url + "/artworks", timeout=10) as response:
+    character_artworks = json.loads(response.read())["data"]
+
+assert {
+    asset["id"] for asset in character_artworks
+} == {
+    expected["studio_avatar_asset_id"], expected["studio_outfit_asset_id"]
+}, character_artworks
+print("ok studio-character-artworks-survive-restart")
+
+with opener.open(studio_character_url + "/ai/drafts", timeout=10) as response:
+    character_drafts = json.loads(response.read())["data"]
+
+assert {draft["section"] for draft in character_drafts} == {
+    "literary_identity", "vocal_identity", "performance_identity"
+}, character_drafts
+print("ok studio-character-drafts-survive-restart")
+
+with opener.open(studio_character_url + "/canon", timeout=10) as response:
+    character_canon = json.loads(response.read())["data"]
+
+assert character_canon["avatar"]["id"] == expected["studio_avatar_asset_id"], character_canon
+print("ok studio-character-canon-survives-restart")
+
+with opener.open(
+    "http://127.0.0.1:" + port + character_canon["avatar"]["file_url"], timeout=10
+) as response:
+    character_artwork = response.read()
+
+assert character_artwork.startswith(b"\x89PNG\r\n\x1a\n"), character_artwork[:16]
+print("ok studio-character-artwork-file-survives-restart")
+
 scene_url = (
     f"http://127.0.0.1:{port}/studio/api/v1/workplaces/"
     f"{expected['workplace_id']}/scenes/{expected['scene_id']}"

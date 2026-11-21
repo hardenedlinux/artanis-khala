@@ -35,16 +35,45 @@ interface Capabilities {
 type IdentityKey = "literary_identity" | "visual_identity" | "vocal_identity" | "performance_identity";
 interface StudioCharacter {
   id: string; workplace_id: string; name: string; role: string; summary: string;
+  concept: string; avatar_asset_id: string | null;
   literary_identity: Record<string, string>;
   visual_identity: Record<string, string>;
   vocal_identity: Record<string, string>;
   performance_identity: Record<string, string>;
+  avatar?: StudioAsset | null;
   created_at: string; updated_at: string; archived_at: string | null;
 }
 interface CharacterDraft {
-  name: string; role: string; summary: string;
+  name: string; role: string; summary: string; concept: string;
   identities: Record<IdentityKey, Record<string, string>>;
 }
+interface CharacterAiDraft {
+  section: IdentityKey; content: Record<string, string>; source: "ai" | "author" | string;
+  model: string; author_edited: boolean; created_at: string; updated_at: string;
+}
+type CharacterOutfitKind = "standard" | "casual" | "battle" | "formal" | "custom";
+interface CharacterOutfit {
+  id: string; character_id: string; name: string; kind: CharacterOutfitKind;
+  description: string; components: string[]; materials: string[]; colors: string[];
+  accessories: string[]; special_features: string[]; image_prompt: string;
+  reference_asset_id: string | null; is_default: boolean;
+  created_at: string; updated_at: string; archived_at: string | null;
+}
+interface CharacterOutfitDraft {
+  name: string; kind: CharacterOutfitKind; description: string;
+  components: string; materials: string; colors: string; accessories: string;
+  special_features: string; image_prompt: string;
+}
+type CharacterArtworkType = "avatar" | "full_body" | "character_sheet" | "expression_sheet" | "outfit";
+interface CharacterArtworkPrompt {
+  character_id: string; artwork_type: CharacterArtworkType; outfit_id: string | null;
+  prompt: string; width: number; height: number;
+}
+interface CharacterArtworkResult {
+  character_id: string; artwork_type: CharacterArtworkType; outfit_id: string | null;
+  prompt: string; asset: StudioAsset;
+}
+type CharacterTab = "overview" | "identity" | "outfits" | "artwork" | "canon";
 interface SceneGivenCircumstances {
   time: string; place: string; environment: string; background: string; prior_events: string;
 }
@@ -125,6 +154,7 @@ const CHARACTER_SECTIONS: { key: IdentityKey; title: string; en: string; icon: s
       { key: "motivations", label: "动机", hint: "当下推动行动的欲望与理由。" },
       { key: "fears", label: "恐惧", hint: "最想避免的失去、羞辱或真相。" },
       { key: "goals", label: "目标", hint: "明确想得到或完成的事情。" },
+      { key: "relationships", label: "关系", hint: "重要关系、依赖与未解决的亏欠。", wide: true },
       { key: "arc", label: "人物弧线", hint: "从何处出发，可能走向怎样的变化。", wide: true },
     ],
   },
@@ -136,6 +166,9 @@ const CHARACTER_SECTIONS: { key: IdentityKey; title: string; en: string; icon: s
       { key: "face", label: "脸部", hint: "骨相、眼睛、鼻子、嘴、肤色、年龄感。" },
       { key: "body", label: "体型", hint: "身高、体态、力量感、行动方式。" },
       { key: "hair", label: "发型", hint: "长度、质地、颜色、日常整理方式。" },
+      { key: "eyes", label: "眼睛", hint: "眼型、眼色、目光习惯。" },
+      { key: "skin", label: "皮肤", hint: "肤色、质感、日晒与疤痕等稳定特征。" },
+      { key: "distinctive_features", label: "辨识特征", hint: "不会随场景变化的伤疤、义肢、饰物或体态。" },
       { key: "clothing", label: "服装", hint: "标志性着装、材质、磨损与配件。", wide: true },
       { key: "palette", label: "色彩", hint: "属于这个角色的稳定色彩关系。" },
       { key: "expressions", label: "表情", hint: "常见表情与情绪显露方式。" },
@@ -147,11 +180,13 @@ const CHARACTER_SECTIONS: { key: IdentityKey; title: string; en: string; icon: s
     description: "稳定的声音 Canon，供对白、朗读和未来的声音制作共同参考。",
     fields: [
       { key: "timbre", label: "音色", hint: "明亮、沙哑、温暖、干涩等稳定质感。" },
+      { key: "voice_character", label: "声音性格", hint: "声音给人的第一印象与表达气质。" },
       { key: "range", label: "音域", hint: "自然音域与情绪升高或压低时的变化。" },
       { key: "pitch", label: "音高", hint: "日常说话的基准高度。" },
       { key: "accent", label: "口音", hint: "地域、阶层或混合口音。" },
       { key: "pronunciation", label: "发音习惯", hint: "特定音节、吞音、咬字与语汇习惯。", wide: true },
       { key: "pace", label: "语速", hint: "节奏、停顿与情绪变化时的加速或放慢。" },
+      { key: "speech_habits", label: "说话习惯", hint: "口头禅、称呼方式、回避或强调的措辞。", wide: true },
     ],
   },
   {
@@ -162,6 +197,8 @@ const CHARACTER_SECTIONS: { key: IdentityKey; title: string; en: string; icon: s
       { key: "movement", label: "动作方式", hint: "走路、转身、进入空间时的节奏。" },
       { key: "gestures", label: "手势", hint: "说话和思考时的手部语言。" },
       { key: "emotional_responses", label: "情绪反应", hint: "愤怒、害怕、亲近或受伤时的表现。", wide: true },
+      { key: "behavioral_traits", label: "行为特征", hint: "长期稳定、可被旁人观察到的行为模式。" },
+      { key: "typical_reactions", label: "典型反应", hint: "面对压力、羞辱、亲密或危险时的第一反应。" },
       { key: "situations", label: "不同情境下的表现", hint: "面对权力、亲密、危险、失败或成功时的差异。", wide: true },
     ],
   },
@@ -176,6 +213,7 @@ function characterDraft(character: StudioCharacter): CharacterDraft {
     name: character.name || "",
     role: character.role || "",
     summary: character.summary || "",
+    concept: character.concept || "",
     identities: {
       literary_identity: { ...(character.literary_identity || {}) },
       visual_identity: { ...(character.visual_identity || {}) },
@@ -573,10 +611,371 @@ function AssetLinkPanel({ workplaceId, resourceType, resourceId, notify }: {
   </section>;
 }
 
+const CHARACTER_TABS: { key: CharacterTab; title: string; en: string; icon: string }[] = [
+  { key: "overview", title: "概览", en: "OVERVIEW", icon: "book" },
+  { key: "identity", title: "身份", en: "IDENTITY", icon: "users" },
+  { key: "outfits", title: "服装", en: "OUTFITS", icon: "grid" },
+  { key: "artwork", title: "视觉作品", en: "ARTWORK", icon: "images" },
+  { key: "canon", title: "正式设定", en: "CANON", icon: "history" },
+];
+
+const OUTFIT_KIND_INFO: Record<CharacterOutfitKind, { label: string; en: string }> = {
+  standard: { label: "标准", en: "STANDARD" },
+  casual: { label: "日常", en: "CASUAL" },
+  battle: { label: "战斗", en: "BATTLE" },
+  formal: { label: "正式", en: "FORMAL" },
+  custom: { label: "自定义", en: "CUSTOM" },
+};
+
+const ARTWORK_TYPE_INFO: Record<CharacterArtworkType, { label: string; en: string; hint: string }> = {
+  avatar: { label: "头像", en: "AVATAR", hint: "用于角色索引与正式头像的胸像构图。" },
+  full_body: { label: "全身立绘", en: "FULL BODY", hint: "完整展示体型、姿态与默认服装。" },
+  character_sheet: { label: "角色设定图", en: "CHARACTER SHEET", hint: "包含多角度、色板与视觉 Canon 摘要。" },
+  expression_sheet: { label: "表情参考", en: "EXPRESSION SHEET", hint: "同一张脸的多种稳定表情。" },
+  outfit: { label: "服装设计图", en: "OUTFIT", hint: "指定服装的材料、结构与穿着效果。" },
+};
+
+function blankOutfitDraft(): CharacterOutfitDraft {
+  return {
+    name: "", kind: "standard", description: "", components: "", materials: "",
+    colors: "", accessories: "", special_features: "", image_prompt: "",
+  };
+}
+
+function outfitDraftFrom(outfit: CharacterOutfit): CharacterOutfitDraft {
+  return {
+    name: outfit.name || "", kind: outfit.kind || "custom",
+    description: outfit.description || "",
+    components: outfit.components.join(", "), materials: outfit.materials.join(", "),
+    colors: outfit.colors.join(", "), accessories: outfit.accessories.join(", "),
+    special_features: outfit.special_features.join(", "),
+    image_prompt: outfit.image_prompt || "",
+  };
+}
+
+function outfitList(value: string): string[] {
+  return value.split(/[,，\n]/).map(item => item.trim()).filter(Boolean);
+}
+
+function outfitPayload(draft: CharacterOutfitDraft) {
+  return {
+    name: draft.name.trim(),
+    kind: draft.kind,
+    description: draft.description.trim(),
+    components: outfitList(draft.components),
+    materials: outfitList(draft.materials),
+    colors: outfitList(draft.colors),
+    accessories: outfitList(draft.accessories),
+    special_features: outfitList(draft.special_features),
+    image_prompt: draft.image_prompt.trim(),
+  };
+}
+
+function artworkTypeOf(asset: StudioAsset): string {
+  const metadata = asset.generation_metadata as any;
+  return typeof metadata?.artwork_type === "string" ? metadata.artwork_type : "reference";
+}
+
+function artworkOutfitId(asset: StudioAsset): string {
+  const metadata = asset.generation_metadata as any;
+  return typeof metadata?.outfit_id === "string" ? metadata.outfit_id : "";
+}
+
+function CharacterAvatar({ character, compact = false }: { character: StudioCharacter; compact?: boolean }) {
+  const avatar = character.avatar;
+  if (avatar?.file_url) return <div className={`character-avatar ${compact ? "compact" : ""}`}><img src={avatar.file_url} alt={character.name}/></div>;
+  return <div className={`character-avatar placeholder ${compact ? "compact" : ""}`}><span>{character.name.trim().slice(0, 1) || "K"}</span></div>;
+}
+
+function CharacterOverviewPanel({ character, draft, dirty, saving, onEdit, onSave, onTab }: {
+  character: StudioCharacter; draft: CharacterDraft; dirty: boolean; saving: boolean;
+  onEdit: (field: "name" | "role" | "summary" | "concept", value: string) => void;
+  onSave: () => void; onTab: (tab: CharacterTab) => void;
+}) {
+  const visual = character.visual_identity || {};
+  const defaultAppearance = visual.standard_appearance || visual.face || character.summary || "视觉 Canon 仍在形成。";
+  return <div className="character-tab-body overview-body">
+    <section className="character-overview-grid">
+      <div className="character-portrait-frame">
+        <CharacterAvatar character={character}/>
+        <div className="portrait-caption"><span>{character.avatar ? "APPROVED AVATAR" : "AUTHOR PORTRAIT PENDING"}</span><small>{character.avatar ? "作者已确认" : "生成头像并在 Artwork 中设为正式头像。"}</small></div>
+      </div>
+      <div className="character-overview-copy">
+        <div className="eyebrow brass-text">CHARACTER STUDIO</div>
+        <h2>{character.name}</h2>
+        <p className="character-role-line">{character.role || "未指定角色定位"}</p>
+        <p className="character-intro">{character.summary || "从一个简单的人物概念开始，逐步建立文学、视觉、声音与表演身份。"}</p>
+        <div className="character-quick-facts">
+          <div><span>默认服装</span><strong>由 Outfits 管理</strong></div>
+          <div><span>视觉 Canon</span><strong>{visual.standard_appearance ? "已建立" : "待补充"}</strong></div>
+          <div><span>稳定 ID</span><strong>{character.id.slice(0, 8)}</strong></div>
+        </div>
+        <div className="character-overview-actions">
+          <button className="tool-button primary" onClick={() => onTab("identity")}><Icon name="pen"/>编辑四类身份</button>
+          <button className="tool-button" onClick={() => onTab("artwork")}><Icon name="sparkle"/>生成视觉作品</button>
+          <button className="tool-button" onClick={() => onTab("outfits")}><Icon name="grid"/>设计服装</button>
+        </div>
+        <p className="character-appearance-note"><span>标准形象</span>{defaultAppearance}</p>
+      </div>
+    </section>
+    <section className="character-meta-panel studio-meta-panel">
+      <div className="character-section-heading wide"><div><div className="eyebrow">AUTHOR NOTES</div><h3>人物档案信息</h3></div><span className={dirty ? "identity-dirty" : ""}>{dirty ? "有未保存修改" : "已保存"}</span></div>
+      <label className="identity-field"><span>角色名</span><small>稳定、可识别的正式称呼。</small><input value={draft.name} maxLength={512} onChange={(event: any) => onEdit("name", event.target.value)}/></label>
+      <label className="identity-field"><span>角色定位</span><small>主角、对手、配角或叙述者。</small><input value={draft.role} maxLength={256} onChange={(event: any) => onEdit("role", event.target.value)}/></label>
+      <label className="identity-field wide"><span>人物概念</span><small>最初的创作种子。AI 以此为起点补全身份，但不会替换这里。</small><textarea rows={3} value={draft.concept} onChange={(event: any) => onEdit("concept", event.target.value)}/></label>
+      <label className="identity-field wide"><span>一句话档案</span><small>迅速回到这个角色是谁。</small><textarea rows={3} value={draft.summary} onChange={(event: any) => onEdit("summary", event.target.value)}/></label>
+      <div className="identity-panel-actions wide"><span>这些信息属于正式档案，不会由 AI 自动覆盖。</span><button className="tool-button primary" disabled={saving || !dirty} onClick={onSave}>{saving ? "保存中…" : "保存档案信息"}</button></div>
+    </section>
+  </div>;
+}
+
+function CharacterIdentityPanel({ character, draft, sectionKey, setSectionKey, dirtySections, saving, aiBusy, drafts, onEdit, onSave, onRegenerate, onDraftEdit, onDraftSave, onApply, onDiscard }: {
+  character: StudioCharacter; draft: CharacterDraft; sectionKey: IdentityKey;
+  setSectionKey: (key: IdentityKey) => void; dirtySections: Record<IdentityKey, boolean>;
+  saving: boolean; aiBusy: string; drafts: CharacterAiDraft[];
+  onEdit: (key: IdentityKey, field: string, value: string) => void;
+  onSave: (key: IdentityKey) => void;
+  onRegenerate: (key?: IdentityKey) => void;
+  onDraftEdit: (key: IdentityKey, field: string, value: string) => void;
+  onDraftSave: (key: IdentityKey) => void;
+  onApply: (key: IdentityKey) => void;
+  onDiscard: (key: IdentityKey) => void;
+}) {
+  const current = CHARACTER_SECTIONS.find(section => section.key === sectionKey) || CHARACTER_SECTIONS[0];
+  const aiDraft = drafts.find(item => item.section === current.key);
+  const identity = draft.identities[current.key] || {};
+  return <div className="character-tab-body identity-body">
+    <div className="identity-toolbar">
+      <div><div className="eyebrow">FOUR IDENTITIES</div><h3>角色的稳定身份</h3><p>每一部分独立保存。AI 生成的内容先进入草稿，只有你明确应用后才写入 Canon。</p></div>
+      <button className="tool-button" disabled={!!aiBusy} onClick={() => onRegenerate()}><Icon name="sparkle"/>{aiBusy === "all" ? "AI 正在补全…" : "AI 补全全部身份"}</button>
+    </div>
+    <div className="identity-tabs">{CHARACTER_SECTIONS.map(section => <button key={section.key} className={sectionKey === section.key ? "active" : ""} onClick={() => setSectionKey(section.key)}><Icon name={section.icon}/><span>{section.title}</span><small>{section.en}</small>{dirtySections[section.key] && <i/>}</button>)}</div>
+    <section className="identity-panel">
+      <div className="identity-panel-head"><div><div className="eyebrow">{current.en}</div><h3>{current.title}</h3><p>{current.description}</p></div><span className={dirtySections[current.key] ? "identity-dirty" : ""}>{dirtySections[current.key] ? "Canon 有未保存修改" : "Canon 已保存"}</span></div>
+      {current.key === "visual_identity" && <div className="canon-note"><strong>视觉 Canon 由作者控制</strong><span>生成图片里的机械手臂、新服装、伤痕等新特征不会自动写回这里。只有你保存或应用草稿后，才会成为正式视觉设定。</span></div>}
+      <div className="identity-grid">{current.fields.map(field => <label key={field.key} className={`identity-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 4 : 3} value={identity[field.key] || ""} onChange={(event: any) => onEdit(current.key, field.key, event.target.value)}/></label>)}</div>
+      <div className="identity-panel-actions"><span>{dirtySections[current.key] ? "只保存当前部分，不影响其他身份资料。" : "可以随时回来继续补充。"}</span><div className="identity-action-group"><button className="tool-button" disabled={!!aiBusy} onClick={() => onRegenerate(current.key)}>{aiBusy === current.key ? "正在生成…" : "只重新生成本节"}</button><button className="tool-button primary" disabled={saving || !dirtySections[current.key]} onClick={() => onSave(current.key)}>保存{current.title}</button></div></div>
+    </section>
+    {aiDraft ? <section className="ai-draft-panel">
+      <div className="ai-draft-head"><div><div className="eyebrow">AI PROPOSAL · NOT CANON</div><h3>{current.title}草稿</h3><p>这是模型根据人物概念生成的建议。可以逐字修改、保存草稿，或应用为正式设定。</p></div><span className={aiDraft.author_edited ? "draft-edited" : "draft-ai"}>{aiDraft.author_edited ? "作者已修改" : "AI 原始草稿"}</span></div>
+      <div className="identity-grid draft-grid">{current.fields.map(field => <label key={field.key} className={`identity-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 4 : 3} value={aiDraft.content[field.key] || ""} onChange={(event: any) => onDraftEdit(current.key, field.key, event.target.value)}/></label>)}</div>
+      <div className="ai-draft-actions"><span>{aiDraft.model ? `模型：${aiDraft.model}` : "模型草稿"}</span><div className="identity-action-group"><button className="quiet-button danger-quiet" disabled={!!aiBusy} onClick={() => onDiscard(current.key)}>丢弃草稿</button><button className="tool-button" disabled={!!aiBusy} onClick={() => onDraftSave(current.key)}>保存草稿修改</button><button className="tool-button primary" disabled={!!aiBusy} onClick={() => onApply(current.key)}>应用为正式 {current.title}</button></div></div>
+    </section> : <div className="ai-draft-empty"><Icon name="sparkle"/><span>本节还没有 AI 草稿。可以使用「只重新生成本节」获取建议。</span></div>}
+  </div>;
+}
+
+function CharacterOutfitsPanel({ workplaceId, characterId, outfits, artworks, reload, notify }: {
+  workplaceId: string; characterId: string; outfits: CharacterOutfit[];
+  artworks: StudioAsset[]; reload: () => Promise<void>; notify: (message: string) => void;
+}) {
+  const [editing, setEditing] = React.useState<string | null>(null);
+  const [draft, setDraft] = React.useState<CharacterOutfitDraft>(blankOutfitDraft());
+  const [busy, setBusy] = React.useState("");
+  const [error, setError] = React.useState("");
+
+  function startNew() { setEditing("new"); setDraft(blankOutfitDraft()); setError(""); }
+  function startEdit(outfit: CharacterOutfit) { setEditing(outfit.id); setDraft(outfitDraftFrom(outfit)); setError(""); }
+  function edit(field: keyof CharacterOutfitDraft, value: string) { setDraft(previous => ({ ...previous, [field]: value })); }
+
+  async function save() {
+    if (!draft.name.trim() || busy) { if (!draft.name.trim()) setError("服装名称不能为空"); return; }
+    setBusy("save"); setError("");
+    try {
+      const path = editing === "new"
+        ? `/workplaces/${workplaceId}/characters/${characterId}/outfits`
+        : `/workplaces/${workplaceId}/characters/${characterId}/outfits/${editing}`;
+      await api(path, { method: editing === "new" ? "POST" : "PUT", body: outfitPayload(draft) });
+      await reload(); setEditing(null); notify("服装设定已保存");
+    } catch (cause: any) { setError(cause?.message || "无法保存服装设定"); }
+    finally { setBusy(""); }
+  }
+
+  async function makeDefault(outfit: CharacterOutfit) {
+    setBusy(outfit.id); setError("");
+    try {
+      await api(`/workplaces/${workplaceId}/characters/${characterId}/outfits/${outfit.id}/default`, { method: "POST" });
+      await reload(); notify(`${outfit.name} 已设为默认服装`);
+    } catch (cause: any) { setError(cause?.message || "无法设置默认服装"); }
+    finally { setBusy(""); }
+  }
+
+  async function archive(outfit: CharacterOutfit) {
+    if (!window.confirm(`归档服装「${outfit.name}」？已有引用与历史图片不会被删除。`)) return;
+    setBusy(outfit.id); setError("");
+    try {
+      await api(`/workplaces/${workplaceId}/characters/${characterId}/outfits/${outfit.id}`, { method: "DELETE" });
+      await reload(); notify("服装已归档");
+    } catch (cause: any) { setError(cause?.message || "无法归档服装"); }
+    finally { setBusy(""); }
+  }
+
+  async function setReference(outfit: CharacterOutfit, assetId: string) {
+    if (!assetId) return;
+    setBusy(outfit.id); setError("");
+    try {
+      await api(`/workplaces/${workplaceId}/characters/${characterId}/outfits/${outfit.id}/reference`, { method: "PUT", body: { asset_id: assetId } });
+      await reload(); notify("服装参考图已确认");
+    } catch (cause: any) { setError(cause?.message || "无法设置参考图"); }
+    finally { setBusy(""); }
+  }
+
+  return <div className="character-tab-body outfits-body">
+    <div className="identity-toolbar"><div><div className="eyebrow">WARDROBE</div><h3>服装方案</h3><p>每套服装是独立设计，不会改写角色的基础 Visual Identity。场景与分镜以后会按 Outfit ID 引用。</p></div><button className="tool-button primary" onClick={startNew}><Icon name="plus"/>建立服装</button></div>
+    {error && <p className="form-error">{error}</p>}
+    {!outfits.length ? <div className="studio-empty-panel"><Icon name="grid"/><h3>衣橱还是空的</h3><p>先建立一套 Standard Outfit，确定角色最常被识别的服装轮廓。</p><button className="tool-button primary" onClick={startNew}>建立第一套服装</button></div> : <div className="outfit-grid">{outfits.map(outfit => {
+      const reference = artworks.find(asset => asset.id === outfit.reference_asset_id);
+      return <article className={`outfit-card ${outfit.is_default ? "default" : ""}`} key={outfit.id}>
+        <div className="outfit-card-visual">{reference?.file_url ? <img src={reference.file_url} alt={`${outfit.name} reference`}/> : <div className="outfit-placeholder"><Icon name="grid"/><span>{OUTFIT_KIND_INFO[outfit.kind]?.en || "OUTFIT"}</span></div>}</div>
+        <div className="outfit-card-copy"><div className="outfit-card-title"><div><small>{OUTFIT_KIND_INFO[outfit.kind]?.en || "CUSTOM"}</small><h3>{outfit.name}</h3></div>{outfit.is_default && <span className="default-badge">默认</span>}</div><p>{outfit.description || "尚未填写服装说明。"}</p>{outfit.colors.length > 0 && <div className="outfit-chips">{outfit.colors.map(color => <span key={color}>{color}</span>)}</div>}
+          <div className="outfit-card-actions"><button className="quiet-button" disabled={busy === outfit.id} onClick={() => startEdit(outfit)}>编辑</button>{!outfit.is_default && <button className="quiet-button" disabled={busy === outfit.id} onClick={() => void makeDefault(outfit)}>设为默认</button>}<button className="quiet-button danger-quiet" disabled={busy === outfit.id} onClick={() => void archive(outfit)}>归档</button></div>
+          <label className="outfit-reference-select"><span>正式参考图</span><select value="" disabled={!artworks.length || busy === outfit.id} onChange={(event: any) => void setReference(outfit, event.target.value)}><option value="">{reference ? "更换参考图…" : "选择已关联图片…"}</option>{artworks.filter(asset => asset.file_url).map(asset => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select></label>
+        </div>
+      </article>;
+    })}</div>}
+    {editing && <section className="outfit-editor">
+      <div className="outfit-editor-head"><div><div className="eyebrow">{editing === "new" ? "NEW OUTFIT" : "EDIT OUTFIT"}</div><h3>{editing === "new" ? "建立服装方案" : "编辑服装方案"}</h3></div><button className="icon-button" onClick={() => setEditing(null)} aria-label="关闭"><Icon name="close"/></button></div>
+      <div className="outfit-editor-grid">
+        <label className="identity-field"><span>名称</span><small>例如 Standard Outfit 或 Battle Outfit。</small><input value={draft.name} maxLength={512} onChange={(event: any) => edit("name", event.target.value)}/></label>
+        <label className="identity-field"><span>类型</span><small>用于衣橱分类，不影响 Canon。</small><select value={draft.kind} onChange={(event: any) => edit("kind", event.target.value)}>{Object.entries(OUTFIT_KIND_INFO).map(([key, info]) => <option key={key} value={key}>{info.label} · {info.en}</option>)}</select></label>
+        <label className="identity-field wide"><span>说明</span><small>整体轮廓、场合与穿着状态。</small><textarea rows={3} value={draft.description} onChange={(event: any) => edit("description", event.target.value)}/></label>
+        <label className="identity-field"><span>服装组成</span><small>用逗号分隔：外套、衬衫、裤装……</small><textarea rows={3} value={draft.components} onChange={(event: any) => edit("components", event.target.value)}/></label>
+        <label className="identity-field"><span>材料</span><small>用逗号分隔：皮革、黄铜、粗呢……</small><textarea rows={3} value={draft.materials} onChange={(event: any) => edit("materials", event.target.value)}/></label>
+        <label className="identity-field"><span>颜色</span><small>稳定的服装色彩关系。</small><textarea rows={3} value={draft.colors} onChange={(event: any) => edit("colors", event.target.value)}/></label>
+        <label className="identity-field"><span>配件</span><small>护目镜、工具带、饰针……</small><textarea rows={3} value={draft.accessories} onChange={(event: any) => edit("accessories", event.target.value)}/></label>
+        <label className="identity-field wide"><span>特殊结构</span><small>机械护臂、可拆卸披风、隐藏口袋等。</small><textarea rows={3} value={draft.special_features} onChange={(event: any) => edit("special_features", event.target.value)}/></label>
+        <label className="identity-field wide"><span>服装图像提示</span><small>给图像生成的稳定设计说明，不替代视觉 Canon。</small><textarea rows={4} value={draft.image_prompt} onChange={(event: any) => edit("image_prompt", event.target.value)}/></label>
+      </div>
+      <div className="identity-panel-actions"><span>服装不会自动成为场景中的默认外观；默认项需要你明确选择。</span><button className="tool-button primary" disabled={busy === "save"} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存服装"}</button></div>
+    </section>}
+  </div>;
+}
+
+function CharacterArtworkPanel({ workplaceId, character, outfits, artworks, reloadArtworks, reloadOutfits, onCharacterChange, notify }: {
+  workplaceId: string; character: StudioCharacter; outfits: CharacterOutfit[];
+  artworks: StudioAsset[]; reloadArtworks: () => Promise<void>; reloadOutfits: () => Promise<void>;
+  onCharacterChange: (character: StudioCharacter) => void; notify: (message: string) => void;
+}) {
+  const [type, setType] = React.useState<CharacterArtworkType>("avatar");
+  const [outfitId, setOutfitId] = React.useState("");
+  const [extra, setExtra] = React.useState("");
+  const [prompt, setPrompt] = React.useState("");
+  const [busy, setBusy] = React.useState("");
+  const [error, setError] = React.useState("");
+  const [selectedId, setSelectedId] = React.useState("");
+
+  React.useEffect(() => {
+    if (!outfits.length) { setOutfitId(""); return; }
+    if (!outfits.some(outfit => outfit.id === outfitId)) {
+      setOutfitId((outfits.find(outfit => outfit.is_default) || outfits[0]).id);
+    }
+  }, [outfits, outfitId]);
+
+  const selected = artworks.find(asset => asset.id === selectedId) || artworks[0] || null;
+  const selectedOutfit = outfits.find(outfit => outfit.id === outfitId) || null;
+
+  async function composePrompt() {
+    setBusy("prompt"); setError("");
+    try {
+      const result = await api<CharacterArtworkPrompt>(`/workplaces/${workplaceId}/characters/${character.id}/artworks/prompt`, {
+        method: "POST", body: { artwork_type: type, outfit_id: outfitId || undefined, extra_description: extra },
+      });
+      setPrompt(result.prompt);
+      if (result.outfit_id) setOutfitId(result.outfit_id);
+      notify("图像提示已组合，可继续编辑");
+      return result.prompt;
+    } catch (cause: any) { setError(cause?.message || "无法组合图像提示"); throw cause; }
+    finally { setBusy(""); }
+  }
+
+  async function generate(finalPrompt?: string) {
+    if (busy) return;
+    setBusy("generate"); setError("");
+    try {
+      let value = (finalPrompt ?? prompt).trim();
+      if (!value) {
+        const result = await api<CharacterArtworkPrompt>(`/workplaces/${workplaceId}/characters/${character.id}/artworks/prompt`, {
+          method: "POST", body: { artwork_type: type, outfit_id: outfitId || undefined, extra_description: extra },
+        });
+        value = result.prompt; setPrompt(value);
+      }
+      const result = await api<CharacterArtworkResult>(`/workplaces/${workplaceId}/characters/${character.id}/artworks/generate`, {
+        method: "POST", body: { artwork_type: type, outfit_id: outfitId || undefined, prompt: value, extra_description: extra },
+      });
+      setSelectedId(result.asset.id);
+      await reloadArtworks();
+      notify("视觉作品已生成并保存到 Assets");
+    } catch (cause: any) { setError(cause?.message || "图像生成失败，角色 Canon 未被修改"); }
+    finally { setBusy(""); }
+  }
+
+  async function setAvatar(asset: StudioAsset) {
+    setBusy("avatar"); setError("");
+    try {
+      const updated = await api<StudioCharacter>(`/workplaces/${workplaceId}/characters/${character.id}/avatar`, { method: "POST", body: { asset_id: asset.id } });
+      onCharacterChange(updated); notify("已确认为正式 Avatar");
+    } catch (cause: any) { setError(cause?.message || "无法设置 Avatar"); }
+    finally { setBusy(""); }
+  }
+
+  async function setOutfitReference(asset: StudioAsset) {
+    if (!outfitId) { setError("请先选择一套服装，再指定参考图。"); return; }
+    setBusy("outfit-reference"); setError("");
+    try {
+      await api(`/workplaces/${workplaceId}/characters/${character.id}/outfits/${outfitId}/reference`, { method: "PUT", body: { asset_id: asset.id } });
+      await reloadOutfits(); notify("已确认为该服装的正式参考图");
+    } catch (cause: any) { setError(cause?.message || "无法设置服装参考图"); }
+    finally { setBusy(""); }
+  }
+
+  return <div className="character-tab-body artwork-body">
+    <div className="identity-toolbar"><div><div className="eyebrow">MOSS-IMAGE · SINGLE STILLS</div><h3>角色视觉作品</h3><p>每次生成一张独立图片。结果进入 Assets 并关联角色，旧图片不会被覆盖，也不会自动修改 Canon。</p></div><span className="artwork-count">{artworks.length} 张作品</span></div>
+    {error && <p className="form-error">{error}</p>}
+    <div className="artwork-workbench">
+      <section className="artwork-stage">
+        {selected?.file_url ? <img src={selected.file_url} alt={selected.name}/> : <div className="artwork-stage-empty"><Icon name="images"/><h3>还没有生成的视觉作品</h3><p>选择构图类型，组合 Prompt，然后启动一次单张图像生成。</p></div>}
+        {selected && <div className="artwork-stage-caption"><div><small>{artworkTypeOf(selected).toUpperCase()}</small><strong>{selected.name}</strong><span>{selected.width && selected.height ? `${selected.width} × ${selected.height}` : assetMediaMeta(selected)}</span></div><div className="artwork-stage-actions"><button className="quiet-button" disabled={busy !== ""} onClick={() => void setAvatar(selected)}>{character.avatar_asset_id === selected.id ? "已是正式 Avatar" : "设为正式 Avatar"}</button>{selectedOutfit && <button className="quiet-button" disabled={busy !== ""} onClick={() => void setOutfitReference(selected)}>设为「{selectedOutfit.name}」参考图</button>}</div></div>}
+      </section>
+      <section className="artwork-controls">
+        <div className="artwork-control-row"><label className="identity-field"><span>作品类型</span><small>{ARTWORK_TYPE_INFO[type].hint}</small><select value={type} onChange={(event: any) => { setType(event.target.value); setPrompt(""); }}>{Object.entries(ARTWORK_TYPE_INFO).map(([key, info]) => <option key={key} value={key}>{info.label} · {info.en}</option>)}</select></label><label className="identity-field"><span>服装</span><small>头像与立绘也可使用默认服装。</small><select value={outfitId} onChange={(event: any) => { setOutfitId(event.target.value); setPrompt(""); }}><option value="">不使用服装</option>{outfits.map(outfit => <option key={outfit.id} value={outfit.id}>{outfit.name}{outfit.is_default ? " · 默认" : ""}</option>)}</select></label></div>
+        <label className="identity-field"><span>额外创作说明</span><small>例如姿态、光线、背景或情绪；不会写回角色 Canon。</small><textarea rows={3} value={extra} onChange={(event: any) => setExtra(event.target.value)} placeholder="站在工作室窗边，午后侧光，克制的表情……"/></label>
+        <div className="artwork-prompt-head"><div><span>图像 Prompt</span><small>生成前完全可见、可编辑。</small></div><button className="quiet-button" disabled={busy !== ""} onClick={() => void composePrompt()}>{busy === "prompt" ? "组合中…" : "重新组合"}</button></div>
+        <textarea className="artwork-prompt" rows={9} value={prompt} onChange={(event: any) => setPrompt(event.target.value)} placeholder="点击「组合 Prompt」根据 Visual Canon、服装与构图类型生成，然后在这里调整。"/>
+        <div className="artwork-generate-row"><button className="tool-button" disabled={busy !== ""} onClick={() => void composePrompt()}>预览 Prompt</button><button className="tool-button primary" disabled={busy !== ""} onClick={() => void generate()}>{busy === "generate" ? "生成中…" : prompt ? "生成图像" : "组合并生成"}</button><button className="quiet-button" disabled={!prompt || busy !== ""} onClick={() => void generate(prompt)}>重新生成</button></div>
+        <p className="artwork-limit-note">当前只生成单张静态图片。图像生成不可用时会明确报错，不会伪造结果。</p>
+      </section>
+    </div>
+    <section className="artwork-gallery-section"><div className="artwork-gallery-head"><div><div className="eyebrow">ARTWORK ARCHIVE</div><h3>全部视觉作品与参考图</h3></div><span>旧作品永久保留，可随时重新选择。</span></div>{!artworks.length ? <div className="studio-empty-panel compact"><Icon name="images"/><p>生成的第一张作品会出现在这里。</p></div> : <div className="artwork-gallery">{artworks.map(asset => <button key={asset.id} className={`artwork-thumb ${selected?.id === asset.id ? "active" : ""}`} onClick={() => setSelectedId(asset.id)}><AssetPreview asset={asset} compact/><span>{asset.name}</span><small>{artworkTypeOf(asset)}</small>{character.avatar_asset_id === asset.id && <i className="avatar-stamp">AVATAR</i>}</button>)}</div>}</section>
+    <AssetLinkPanel workplaceId={workplaceId} resourceType="character" resourceId={character.id} notify={(message) => { notify(message); void reloadArtworks(); }}/>
+  </div>;
+}
+
+function CharacterCanonPanel({ character, outfits, drafts, onTab }: {
+  character: StudioCharacter; outfits: CharacterOutfit[]; drafts: CharacterAiDraft[];
+  onTab: (tab: CharacterTab) => void;
+}) {
+  return <div className="character-tab-body canon-body">
+    <div className="identity-toolbar"><div><div className="eyebrow">AUTHOR APPROVED</div><h3>正式角色设定</h3><p>Canon 只包含作者明确保存或确认的内容。AI 草稿、生成的图片和新视觉特征不会自动进入这里。</p></div><span className="canon-seal">AUTHOR SEAL</span></div>
+    <section className="canon-overview-card"><div className="canon-avatar">{character.avatar?.file_url ? <img src={character.avatar.file_url} alt={character.name}/> : <div className="character-avatar placeholder"><span>{character.name.slice(0, 1)}</span></div>}</div><div><div className="eyebrow">OFFICIAL AVATAR</div><h2>{character.name}</h2><p>{character.summary || "这个人物的正式档案仍在书写。"}</p><small>{character.avatar ? "作者已确认这张图片为正式头像。" : "还没有确认正式头像。"}</small></div><button className="tool-button" onClick={() => onTab("artwork")}>管理视觉作品</button></section>
+    <div className="canon-columns">
+      <section className="canon-identity-list"><div className="canon-section-title"><h3>身份 Canon</h3><button className="quiet-button" onClick={() => onTab("identity")}>编辑身份</button></div>{CHARACTER_SECTIONS.map(section => {
+        const identity = character[section.key] || {};
+        const values = section.fields.filter(field => (identity[field.key] || "").trim());
+        return <article key={section.key} className="canon-identity-item"><div><span>{section.en}</span><h4>{section.title}</h4></div>{values.length ? <dl>{values.map(field => <div key={field.key}><dt>{field.label}</dt><dd>{identity[field.key]}</dd></div>)}</dl> : <p>尚未建立正式内容。</p>}</article>;
+      })}</section>
+      <section className="canon-outfit-list"><div className="canon-section-title"><h3>服装 Canon</h3><button className="quiet-button" onClick={() => onTab("outfits")}>管理服装</button></div>{!outfits.length ? <p className="canon-empty">尚未建立服装方案。</p> : outfits.map(outfit => <article key={outfit.id} className={`canon-outfit-item ${outfit.is_default ? "default" : ""}`}><div><span>{OUTFIT_KIND_INFO[outfit.kind]?.en || "CUSTOM"}</span><h4>{outfit.name}</h4></div><p>{outfit.description || "尚未填写说明。"}</p><small>{outfit.reference_asset_id ? "已确认正式参考图" : "尚无正式参考图"}{outfit.is_default ? " · 默认服装" : ""}</small></article>)}</section>
+      <section className="canon-draft-status"><div className="eyebrow">PENDING PROPOSALS</div><strong>{drafts.length}</strong><p>{drafts.length ? "节 AI 草稿等待审核。它们尚未进入 Canon。" : "没有待审核的 AI 草稿。"}</p>{drafts.length > 0 && <button className="tool-button" onClick={() => onTab("identity")}>审核草稿</button>}</section>
+    </div>
+  </div>;
+}
+
 function CharactersWorkspace({ workplace, notify }: { workplace: Workplace; notify: (message: string) => void }) {
   const [characters, setCharacters] = React.useState<StudioCharacter[]>([]);
   const [active, setActive] = React.useState<StudioCharacter | null>(null);
   const [draft, setDraft] = React.useState<CharacterDraft | null>(null);
+  const [aiDrafts, setAiDrafts] = React.useState<CharacterAiDraft[]>([]);
+  const [outfits, setOutfits] = React.useState<CharacterOutfit[]>([]);
+  const [artworks, setArtworks] = React.useState<StudioAsset[]>([]);
+  const [tab, setTab] = React.useState<CharacterTab>("overview");
   const [sectionKey, setSectionKey] = React.useState<IdentityKey>("literary_identity");
   const [dirtySections, setDirtySections] = React.useState<Record<IdentityKey, boolean>>({
     literary_identity: false, visual_identity: false,
@@ -585,54 +984,56 @@ function CharactersWorkspace({ workplace, notify }: { workplace: Workplace; noti
   const [metaDirty, setMetaDirty] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
+  const [aiBusy, setAiBusy] = React.useState("");
   const [error, setError] = React.useState("");
   const [modal, setModal] = React.useState<"create" | "archive" | null>(null);
+  const [newConcept, setNewConcept] = React.useState("");
   const [newName, setNewName] = React.useState("");
   const [newRole, setNewRole] = React.useState("");
-  const [newSummary, setNewSummary] = React.useState("");
 
   function resetDirty() {
     setMetaDirty(false);
-    setDirtySections({
-      literary_identity: false, visual_identity: false,
-      vocal_identity: false, performance_identity: false,
-    });
-  }
-
-  function installCharacter(character: StudioCharacter) {
-    setActive(character);
-    setDraft(characterDraft(character));
-    setSectionKey("literary_identity");
-    resetDirty();
-    setError("");
+    setDirtySections({ literary_identity: false, visual_identity: false, vocal_identity: false, performance_identity: false });
   }
 
   function updateCharacterList(character: StudioCharacter) {
     setCharacters(previous => {
       const exists = previous.some(item => item.id === character.id);
-      return exists
-        ? previous.map(item => item.id === character.id ? character : item)
-        : [character, ...previous];
+      return exists ? previous.map(item => item.id === character.id ? character : item) : [character, ...previous];
     });
+  }
+
+  function install(character: StudioCharacter, drafts: CharacterAiDraft[], nextOutfits: CharacterOutfit[], nextArtworks: StudioAsset[]) {
+    setActive(character);
+    setDraft(characterDraft(character));
+    setAiDrafts(drafts);
+    setOutfits(nextOutfits);
+    setArtworks(nextArtworks);
+    resetDirty();
+  }
+
+  async function loadDetails(id: string) {
+    const [character, drafts, nextOutfits, nextArtworks] = await Promise.all([
+      api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${id}`),
+      api<CharacterAiDraft[]>(`/workplaces/${workplace.id}/characters/${id}/ai/drafts`),
+      api<CharacterOutfit[]>(`/workplaces/${workplace.id}/characters/${id}/outfits`),
+      api<StudioAsset[]>(`/workplaces/${workplace.id}/characters/${id}/artworks`),
+    ]);
+    install(character, drafts, nextOutfits, nextArtworks);
+    updateCharacterList(character);
   }
 
   React.useEffect(() => {
     let alive = true;
-    setLoading(true);
-    setError("");
+    setLoading(true); setError("");
     api<StudioCharacter[]>(`/workplaces/${workplace.id}/characters`)
       .then(async list => {
         if (!alive) return;
         setCharacters(list);
-        if (!list.length) {
-          setActive(null); setDraft(null); resetDirty(); return;
-        }
-        const detail = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${list[0].id}`);
-        if (alive) installCharacter(detail);
+        if (!list.length) { setActive(null); setDraft(null); setAiDrafts([]); setOutfits([]); setArtworks([]); resetDirty(); return; }
+        await loadDetails(list[0].id);
       })
-      .catch((cause: any) => {
-        if (alive) setError(cause?.message || "无法读取角色列表");
-      })
+      .catch((cause: any) => { if (alive) setError(cause?.message || "无法读取角色列表"); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [workplace.id]);
@@ -643,168 +1044,191 @@ function CharactersWorkspace({ workplace, notify }: { workplace: Workplace; noti
     if (active?.id === id) return;
     if (hasChanges && !window.confirm("当前角色还有未保存的修改。切换角色会放弃这些修改，继续吗？")) return;
     setLoading(true); setError("");
-    try {
-      const detail = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${id}`);
-      installCharacter(detail);
-    } catch (cause: any) {
-      setError(cause?.message || "无法打开角色");
-    } finally { setLoading(false); }
+    try { await loadDetails(id); setTab("overview"); }
+    catch (cause: any) { setError(cause?.message || "无法打开角色"); }
+    finally { setLoading(false); }
   }
 
   async function createCharacter() {
-    const name = newName.trim();
-    if (!name || saving) return;
+    const concept = newConcept.trim();
+    if (!concept || saving) { if (!concept) setError("请先写下一个人物概念"); return; }
+    const name = newName.trim() || concept.slice(0, 28);
     setSaving(true); setError("");
     try {
       const created = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters`, {
-        method: "POST",
-        body: { name, role: newRole.trim(), summary: newSummary.trim() },
+        method: "POST", body: { name, role: newRole.trim(), concept, summary: concept.slice(0, 400) },
       });
       updateCharacterList(created);
-      installCharacter(created);
-      setModal(null); setNewName(""); setNewRole(""); setNewSummary("");
-      notify("角色档案已建立");
-    } catch (cause: any) {
-      setError(cause?.message || "创建角色失败");
-    } finally { setSaving(false); }
+      let aiError = "";
+      try {
+        await api<CharacterAiDraft[]>(`/workplaces/${workplace.id}/characters/${created.id}/ai/develop`, { method: "POST", body: { concept } });
+      } catch (cause: any) { aiError = cause?.message || "AI 人物补全暂时不可用"; }
+      await loadDetails(created.id);
+      setModal(null); setNewConcept(""); setNewName(""); setNewRole(""); setTab("identity");
+      if (aiError) setError(`角色已建立，但 AI 补全失败：${aiError}`); else notify("角色已建立，四类身份草稿等待审核");
+    } catch (cause: any) { setError(cause?.message || "创建角色失败"); }
+    finally { setSaving(false); }
   }
 
   async function saveMetadata() {
     if (!active || !draft || saving) return;
-    const name = draft.name.trim();
-    if (!name) { setError("角色名不能为空"); return; }
+    if (!draft.name.trim()) { setError("角色名不能为空"); return; }
     setSaving(true); setError("");
     try {
       const saved = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${active.id}`, {
-        method: "PUT",
-        body: { name, role: draft.role.trim(), summary: draft.summary.trim() },
+        method: "PUT", body: { name: draft.name.trim(), role: draft.role.trim(), concept: draft.concept.trim(), summary: draft.summary.trim() },
       });
-      setActive(saved);
-      updateCharacterList(saved);
-      setDraft(previous => previous ? { ...previous, name: saved.name, role: saved.role, summary: saved.summary } : previous);
-      setMetaDirty(false);
-      notify("角色档案信息已保存");
-    } catch (cause: any) {
-      setError(cause?.message || "保存角色档案失败");
-    } finally { setSaving(false); }
+      setActive(saved); updateCharacterList(saved);
+      setDraft(previous => previous ? { ...previous, name: saved.name, role: saved.role, concept: saved.concept, summary: saved.summary } : previous);
+      setMetaDirty(false); notify("角色档案信息已保存");
+    } catch (cause: any) { setError(cause?.message || "保存角色档案失败"); }
+    finally { setSaving(false); }
   }
 
   async function saveIdentity(key: IdentityKey) {
     if (!active || !draft || saving) return;
     setSaving(true); setError("");
     try {
-      const saved = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${active.id}`, {
-        method: "PUT",
-        body: { [key]: draft.identities[key] },
-      });
-      setActive(saved);
-      updateCharacterList(saved);
-      setDraft(previous => previous ? {
-        ...previous,
-        identities: { ...previous.identities, [key]: { ...(saved[key] || {}) } },
-      } : previous);
+      const saved = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${active.id}`, { method: "PUT", body: { [key]: draft.identities[key] } });
+      setActive(saved); updateCharacterList(saved);
+      setDraft(previous => previous ? { ...previous, identities: { ...previous.identities, [key]: { ...(saved[key] || {}) } } } : previous);
       setDirtySections(previous => ({ ...previous, [key]: false }));
-      notify(`${CHARACTER_SECTIONS.find(section => section.key === key)?.title || "身份"}已保存`);
-    } catch (cause: any) {
-      setError(cause?.message || "保存身份资料失败");
-    } finally { setSaving(false); }
+      notify(`${CHARACTER_SECTIONS.find(section => section.key === key)?.title || "身份"}已保存为 Canon`);
+    } catch (cause: any) { setError(cause?.message || "保存身份失败"); }
+    finally { setSaving(false); }
+  }
+
+  async function regenerateIdentity(key?: IdentityKey) {
+    if (!active || aiBusy) return;
+    setAiBusy(key || "all"); setError("");
+    const body = { concept: draft?.concept || active.concept || "" };
+    try {
+      const path = key
+        ? `/workplaces/${workplace.id}/characters/${active.id}/ai/develop/${key}`
+        : `/workplaces/${workplace.id}/characters/${active.id}/ai/develop`;
+      let next: CharacterAiDraft[];
+      try { next = await api<CharacterAiDraft[]>(path, { method: "POST", body }); }
+      catch (cause: any) {
+        if (cause?.status === 409 && window.confirm("这一节已有你修改过的草稿。重新生成会覆盖它，继续吗？")) {
+          next = await api<CharacterAiDraft[]>(path, { method: "POST", body: { ...body, force: true } });
+        } else throw cause;
+      }
+      setAiDrafts(next); notify(key ? "本节 AI 草稿已更新" : "四类身份 AI 草稿已更新");
+    } catch (cause: any) { setError(cause?.message || "AI 人物补全失败"); }
+    finally { setAiBusy(""); }
+  }
+
+  function editDraft(key: IdentityKey, field: string, value: string) {
+    setAiDrafts(previous => previous.map(item => item.section === key ? { ...item, content: { ...item.content, [field]: value }, author_edited: true } : item));
+  }
+
+  async function saveDraft(key: IdentityKey) {
+    if (!active) return;
+    const item = aiDrafts.find(entry => entry.section === key);
+    if (!item) return;
+    setSaving(true); setError("");
+    try {
+      const saved = await api<CharacterAiDraft>(`/workplaces/${workplace.id}/characters/${active.id}/ai/drafts/${key}`, { method: "PUT", body: { content: item.content } });
+      setAiDrafts(previous => previous.map(entry => entry.section === key ? saved : entry));
+      notify("AI 草稿修改已保存");
+    } catch (cause: any) { setError(cause?.message || "保存草稿失败"); }
+    finally { setSaving(false); }
+  }
+
+  async function applyDraft(key: IdentityKey) {
+    if (!active) return;
+    setSaving(true); setError("");
+    try {
+      const saved = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${active.id}/ai/drafts/${key}/apply`, { method: "POST" });
+      setActive(saved); updateCharacterList(saved);
+      setDraft(previous => previous ? { ...previous, identities: { ...previous.identities, [key]: { ...(saved[key] || {}) } } } : previous);
+      setAiDrafts(previous => previous.filter(entry => entry.section !== key));
+      notify(`${CHARACTER_SECTIONS.find(section => section.key === key)?.title || "身份"}已确认进入 Canon`);
+    } catch (cause: any) { setError(cause?.message || "应用草稿失败"); }
+    finally { setSaving(false); }
+  }
+
+  async function discardDraft(key: IdentityKey) {
+    if (!active || !window.confirm("丢弃这份 AI 草稿？正式 Canon 不受影响。")) return;
+    setError("");
+    try {
+      await api(`/workplaces/${workplace.id}/characters/${active.id}/ai/drafts/${key}`, { method: "DELETE" });
+      setAiDrafts(previous => previous.filter(entry => entry.section !== key)); notify("AI 草稿已丢弃");
+    } catch (cause: any) { setError(cause?.message || "无法丢弃草稿"); }
+  }
+
+  function editMeta(field: "name" | "role" | "summary" | "concept", value: string) {
+    setDraft(previous => previous ? { ...previous, [field]: value } : previous); setMetaDirty(true);
+  }
+
+  function editIdentity(key: IdentityKey, field: string, value: string) {
+    setDraft(previous => previous ? { ...previous, identities: { ...previous.identities, [key]: { ...previous.identities[key], [field]: value } } } : previous);
+    setDirtySections(previous => ({ ...previous, [key]: true }));
+  }
+
+  async function reloadOutfits() {
+    if (!active) return;
+    const next = await api<CharacterOutfit[]>(`/workplaces/${workplace.id}/characters/${active.id}/outfits`);
+    setOutfits(next);
+  }
+
+  async function reloadArtworks() {
+    if (!active) return;
+    const next = await api<StudioAsset[]>(`/workplaces/${workplace.id}/characters/${active.id}/artworks`);
+    setArtworks(next);
+  }
+
+  function onCharacterChanged(character: StudioCharacter) {
+    setActive(character); updateCharacterList(character);
   }
 
   async function archiveCharacter() {
     if (!active || saving) return;
     setSaving(true); setError("");
     try {
-      await api<{ archived_at: string }>(`/workplaces/${workplace.id}/characters/${active.id}`, { method: "DELETE" });
-      setModal(null);
-      const list = await api<StudioCharacter[]>(`/workplaces/${workplace.id}/characters`);
-      setCharacters(list);
-      if (list.length) {
-        const next = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${list[0].id}`);
-        installCharacter(next);
-      } else {
-        setActive(null); setDraft(null); resetDirty();
-      }
-      notify("角色已归档，历史引用不会被破坏");
-    } catch (cause: any) {
-      setError(cause?.message || "归档角色失败");
-    } finally { setSaving(false); }
+      await api(`/workplaces/${workplace.id}/characters/${active.id}`, { method: "DELETE" });
+      const remaining = characters.filter(character => character.id !== active.id);
+      setCharacters(remaining); setModal(null);
+      if (remaining.length) await loadDetails(remaining[0].id); else { setActive(null); setDraft(null); setAiDrafts([]); setOutfits([]); setArtworks([]); }
+      notify("角色已归档，稳定 ID 与历史引用保留");
+    } catch (cause: any) { setError(cause?.message || "归档角色失败"); }
+    finally { setSaving(false); }
   }
-
-  function editMeta(field: "name" | "role" | "summary", value: string) {
-    setDraft(previous => previous ? { ...previous, [field]: value } : previous);
-    setMetaDirty(true);
-    setError("");
-  }
-
-  function editIdentity(key: IdentityKey, field: string, value: string) {
-    setDraft(previous => previous ? {
-      ...previous,
-      identities: {
-        ...previous.identities,
-        [key]: { ...previous.identities[key], [field]: value },
-      },
-    } : previous);
-    setDirtySections(previous => ({ ...previous, [key]: true }));
-    setError("");
-  }
-
-  const currentSection = CHARACTER_SECTIONS.find(section => section.key === sectionKey) || CHARACTER_SECTIONS[0];
-  const saveLabel = saving ? "正在保存…" : hasChanges ? "有未保存修改" : "已保存";
 
   function renderCharacterList() {
-    if (loading && !characters.length) {
-      return <div className="character-state"><span className="thinking-mark">✦</span><p>正在翻阅角色档案……</p></div>;
-    }
-    if (!characters.length) {
-      return <div className="character-state character-empty-state"><div className="empty-book">✦</div><h2>还没有角色。</h2><p>先建立一个稳定身份，之后可以逐步完善四类资料。</p><button className="tool-button primary" onClick={() => setModal("create")}><Icon name="plus"/>建立第一个角色</button></div>;
-    }
-    return <div className="character-list">{characters.map(character => <button key={character.id} className={`character-row ${active?.id === character.id ? "active" : ""}`} onClick={() => void selectCharacter(character.id)}>
-      <span className="character-monogram">{character.name.trim().slice(0, 1) || "?"}</span>
-      <span className="character-row-copy"><strong>{character.name}</strong><small>{character.role || "未设定角色定位"}</small><span>{characterAppearance(character)}</span></span>
-    </button>)}</div>;
+    if (loading && !characters.length) return <div className="character-state">正在装订角色档案……</div>;
+    if (!characters.length) return <div className="character-state character-empty-state"><div className="placeholder-ornament">K</div><h2>还没有角色</h2><p>写下一个简单的人物概念，让 Character Studio 开始补全。</p><button className="head-btn" onClick={() => setModal("create")}><Icon name="plus"/>建立第一个角色</button></div>;
+    return <div className="character-list">{characters.map(character => <button key={character.id} className={`character-row ${active?.id === character.id ? "active" : ""}`} onClick={() => void selectCharacter(character.id)}><CharacterAvatar character={character} compact/><div className="character-row-copy"><strong>{character.name}</strong><small>{character.role || "CHARACTER"}</small><span>{character.summary || "档案正在形成。"}</span></div></button>)}</div>;
   }
 
-  function renderCharacterDetail() {
-    if (!active || !draft) {
-      return <div className="character-empty-detail"><div className="placeholder-ornament">K</div><div className="eyebrow brass-text">CHARACTER DOSSIER</div><h2>让角色先拥有一个名字。</h2><p>角色是 Workplace 的一等资源。身份资料可以逐步补充，不需要一次完成。</p><button className="tool-button primary" onClick={() => setModal("create")}><Icon name="plus"/>建立角色档案</button></div>;
-    }
+  function renderDetail() {
+    if (!active || !draft) return <div className="character-empty-detail"><div className="placeholder-ornament">K</div><div className="eyebrow brass-text">CHARACTER STUDIO</div><h2>从一个人物概念开始。</h2><p>写下角色是谁、来自哪里、想要什么，AI 会提出四类身份草稿；你逐项审核后，才成为正式 Canon。</p><button className="tool-button primary" onClick={() => setModal("create")}><Icon name="sparkle"/>创建角色概念</button></div>;
+    const current = CHARACTER_SECTIONS.find(section => section.key === sectionKey) || CHARACTER_SECTIONS[0];
     return <>
-      <div className="character-detail-head">
-        <div><div className="eyebrow">CHARACTER DOSSIER · {active.role || "UNASSIGNED"}</div><h2>{active.name}</h2><p>{active.summary || "这个角色的档案正在形成。"}</p></div>
-        <div className="character-detail-actions"><span className={`character-save-state ${hasChanges ? "dirty" : ""}`}>{saveLabel}</span><button className="head-btn archive-character" disabled={saving} onClick={() => setModal("archive")}>归档角色</button></div>
-      </div>
-      <div className="character-meta-panel">
-        <label className="identity-field"><span>角色名</span><small>稳定、可识别的正式称呼。</small><input value={draft.name} maxLength={512} onChange={(event: any) => editMeta("name", event.target.value)}/></label>
-        <label className="identity-field"><span>角色定位</span><small>例如主角、对手、配角或叙述者。</small><input value={draft.role} maxLength={256} onChange={(event: any) => editMeta("role", event.target.value)}/></label>
-        <label className="identity-field wide"><span>一句话档案</span><small>迅速回到这个角色是谁。</small><textarea rows={3} value={draft.summary} onChange={(event: any) => editMeta("summary", event.target.value)}/></label>
-        <div className="identity-panel-actions wide"><span>{metaDirty ? "档案信息有未保存修改" : "档案信息已保存"}</span><button className="tool-button" disabled={saving || !metaDirty} onClick={() => void saveMetadata()}>保存档案信息</button></div>
-      </div>
-      <div className="identity-tabs">{CHARACTER_SECTIONS.map(section => <button key={section.key} className={sectionKey === section.key ? "active" : ""} onClick={() => setSectionKey(section.key)}><Icon name={section.icon}/><span>{section.title}</span><small>{section.en}</small>{dirtySections[section.key] && <i/>}</button>)}</div>
-      <section className="identity-panel">
-        <div className="identity-panel-head"><div><div className="eyebrow">{currentSection.en}</div><h3>{currentSection.title}</h3><p>{currentSection.description}</p></div><span className={dirtySections[currentSection.key] ? "identity-dirty" : ""}>{dirtySections[currentSection.key] ? "本节未保存" : "本节已保存"}</span></div>
-        {currentSection.key === "visual_identity" && <div className="canon-note"><strong>视觉 Canon 由作者控制</strong><span>AI 生成中出现的机械手臂、新服装、伤痕等新特征不会自动修改这里；只有你明确保存后才会成为 Canon。</span></div>}
-        <div className="identity-grid">{currentSection.fields.map(field => <label key={field.key} className={`identity-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 4 : 3} value={draft.identities[currentSection.key][field.key] || ""} onChange={(event: any) => editIdentity(currentSection.key, field.key, event.target.value)}/></label>)}</div>
-        <div className="identity-panel-actions"><span>{dirtySections[currentSection.key] ? "只保存这一部分，不会覆盖其他身份资料。" : "可以随时回来继续补充。"}</span><button className="tool-button primary" disabled={saving || !dirtySections[currentSection.key]} onClick={() => void saveIdentity(currentSection.key)}>保存{currentSection.title}</button></div>
-      </section>
-      <AssetLinkPanel workplaceId={workplace.id} resourceType="character" resourceId={active.id} notify={notify}/>
+      <div className="character-detail-head"><div><div className="eyebrow">CHARACTER STUDIO · {active.role || "UNASSIGNED"}</div><h2>{active.name}</h2><p>{active.summary || active.concept || "这个角色的档案正在形成。"}</p></div><div className="character-detail-actions"><span className={`character-save-state ${hasChanges ? "dirty" : ""}`}>{hasChanges ? "有未保存修改" : "已保存"}</span><button className="head-btn archive-character" disabled={saving} onClick={() => setModal("archive")}>归档角色</button></div></div>
+      <div className="character-studio-tabs">{CHARACTER_TABS.map(item => <button key={item.key} className={tab === item.key ? "active" : ""} onClick={() => setTab(item.key)}><Icon name={item.icon}/><span>{item.title}</span><small>{item.en}</small></button>)}</div>
+      {tab === "overview" && <CharacterOverviewPanel character={active} draft={draft} dirty={metaDirty} saving={saving} onEdit={editMeta} onSave={() => void saveMetadata()} onTab={setTab}/>}
+      {tab === "identity" && <CharacterIdentityPanel character={active} draft={draft} sectionKey={current.key} setSectionKey={setSectionKey} dirtySections={dirtySections} saving={saving} aiBusy={aiBusy} drafts={aiDrafts} onEdit={editIdentity} onSave={(key) => void saveIdentity(key)} onRegenerate={(key) => void regenerateIdentity(key)} onDraftEdit={editDraft} onDraftSave={(key) => void saveDraft(key)} onApply={(key) => void applyDraft(key)} onDiscard={(key) => void discardDraft(key)}/>}
+      {tab === "outfits" && <CharacterOutfitsPanel workplaceId={workplace.id} characterId={active.id} outfits={outfits} artworks={artworks} reload={reloadOutfits} notify={notify}/>}
+      {tab === "artwork" && <CharacterArtworkPanel workplaceId={workplace.id} character={active} outfits={outfits} artworks={artworks} reloadArtworks={reloadArtworks} reloadOutfits={reloadOutfits} onCharacterChange={onCharacterChanged} notify={notify}/>}
+      {tab === "canon" && <CharacterCanonPanel character={active} outfits={outfits} drafts={aiDrafts} onTab={setTab}/>}
     </>;
   }
 
   return <div className="book-stage character-stage">
-    <div className="book-topline"><div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace.title}</span><span className="top-separator">/</span><span className="document-crumb">CHARACTERS</span></div><div className="book-actions"><span className="character-count">{characters.length} 个角色</span><button className="head-btn" onClick={() => setModal("create")}><Icon name="plus"/>新建角色</button></div></div>
+    <div className="book-topline"><div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace.title}</span><span className="top-separator">/</span><span className="document-crumb">CHARACTER STUDIO</span></div><div className="book-actions"><span className="character-count">{characters.length} 个角色</span><button className="head-btn" onClick={() => setModal("create")}><Icon name="plus"/>新建角色</button></div></div>
     <div className="character-workspace">
-      <aside className="character-index"><div className="character-index-head"><div className="eyebrow brass-text">THE LIVING ATELIER</div><h1>角色档案</h1><p>稳定身份是场景、写作与制作共同引用的基础。</p></div>{error && <div className="character-error">{error}<button onClick={() => setModal(null)}>关闭</button></div>}{renderCharacterList()}</aside>
-      <main className="character-detail">{renderCharacterDetail()}</main>
+      <aside className="character-index"><div className="character-index-head"><div className="eyebrow brass-text">THE LIVING ATELIER</div><h1>角色工作室</h1><p>从人物概念到四类身份、服装与视觉作品，最后由作者确认 Canon。</p></div>{error && <div className="character-error">{error}<button onClick={() => setError("")}>关闭</button></div>}{renderCharacterList()}</aside>
+      <main className="character-detail">{renderDetail()}</main>
     </div>
-    {modal === "create" && <Modal title="建立角色档案" eyebrow="A NEW CHARACTER ENTERS" onClose={() => { setModal(null); setError(""); }} actions={<><button className="quiet-button" onClick={() => setModal(null)}>取消</button><button className="confirm-button" disabled={!newName.trim() || saving} onClick={() => void createCharacter()}>{saving ? "创建中…" : "建立并开始"}</button></>}>
-      <p className="modal-intro">先确定名字、定位和一句话档案。四类身份资料可以在角色工作区中逐步完善。</p>
+    {modal === "create" && <Modal title="从一个人物概念开始" eyebrow="CHARACTER STUDIO" onClose={() => { setModal(null); setError(""); }} actions={<><button className="quiet-button" onClick={() => setModal(null)}>取消</button><button className="confirm-button" disabled={!newConcept.trim() || saving} onClick={() => void createCharacter()}>{saving ? "建立并生成草稿…" : "建立角色并补全"}</button></>} className="character-create-modal">
+      <p className="modal-intro">只需要一段自然语言描述。AI 会补全文学、视觉、声音和表演身份；所有内容先作为草稿，由你逐项审核。</p>
       {error && <p className="form-error">{error}</p>}
-      <label className="field-label">角色名<input autoFocus value={newName} maxLength={512} onChange={(event: any) => setNewName(event.target.value)} placeholder="角色的正式称呼"/></label>
-      <label className="field-label">角色定位<input value={newRole} maxLength={256} onChange={(event: any) => setNewRole(event.target.value)} placeholder="主角、对手、配角……"/></label>
-      <label className="field-label">一句话档案<textarea rows={3} value={newSummary} onChange={(event: any) => setNewSummary(event.target.value)} placeholder="用一句话说明这个角色是谁。"/></label>
+      <label className="field-label">人物概念<textarea autoFocus rows={5} value={newConcept} maxLength={4000} onChange={(event: any) => setNewConcept(event.target.value)} placeholder="一个生活在蒸汽朋克世界的年轻机械师，性格独立，不喜欢依赖别人。"/></label>
+      <div className="modal-two-column"><label className="field-label">角色名（可选）<input value={newName} maxLength={512} onChange={(event: any) => setNewName(event.target.value)} placeholder="留空则从概念自动取名"/></label><label className="field-label">角色定位（可选）<input value={newRole} maxLength={256} onChange={(event: any) => setNewRole(event.target.value)} placeholder="主角、对手、配角……"/></label></div>
     </Modal>}
     {modal === "archive" && active && <Modal title="归档这个角色？" eyebrow="SOFT ARCHIVE" onClose={() => setModal(null)} actions={<><button className="quiet-button" onClick={() => setModal(null)}>保留角色</button><button className="confirm-button danger-button" disabled={saving} onClick={() => void archiveCharacter()}>{saving ? "归档中…" : "确认归档"}</button></>}>
-      <p className="modal-intro">“{active.name}”会从角色列表中隐藏，但数据库记录和稳定 Character ID 会保留，避免破坏未来场景、资产与制作的引用。</p>
+      <p className="modal-intro">“{active.name}”会从角色列表中隐藏，但数据库记录、Outfit、Artwork 和稳定 Character ID 会保留，避免破坏场景与资产引用。</p>
       {error && <p className="form-error">{error}</p>}
     </Modal>}
   </div>;

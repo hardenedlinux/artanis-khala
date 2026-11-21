@@ -332,6 +332,168 @@
               (studio-archive-character! config (params rc "workplace_id")
                                          (params rc "character_id")))))))
 
+(get "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/ai/drafts"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-character-drafts config (params rc "workplace_id")
+                                         (params rc "character_id")))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/ai/develop"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-develop-character! config (params rc "workplace_id")
+                                       (params rc "character_id")
+                                       (body-json rc) #f))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/ai/develop/:section"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-develop-character! config (params rc "workplace_id")
+                                       (params rc "character_id")
+                                       (body-json rc)
+                                       (params rc "section")))))))
+
+(put "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/ai/drafts/:section"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-update-character-draft! config (params rc "workplace_id")
+                                           (params rc "character_id")
+                                           (params rc "section")
+                                           (body-json rc)))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/ai/drafts/:section/apply"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-apply-character-draft! config (params rc "workplace_id")
+                                           (params rc "character_id")
+                                           (params rc "section")))))))
+
+(page-delete "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/ai/drafts/:section"
+             (lambda (rc)
+               (api-handler
+                (lambda ()
+                  (reply-success
+                   (studio-discard-character-draft!
+                    config (params rc "workplace_id")
+                    (params rc "character_id") (params rc "section")))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/outfits"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-character-outfits config (params rc "workplace_id")
+                                          (params rc "character_id")))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/outfits"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-create-character-outfit! config (params rc "workplace_id")
+                                             (params rc "character_id")
+                                             (body-json rc))
+            201)))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/outfits/:outfit_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-get-character-outfit config (params rc "workplace_id")
+                                        (params rc "character_id")
+                                        (params rc "outfit_id")))))))
+
+(put "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/outfits/:outfit_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-update-character-outfit! config (params rc "workplace_id")
+                                            (params rc "character_id")
+                                            (params rc "outfit_id")
+                                            (body-json rc)))))))
+
+(page-delete "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/outfits/:outfit_id"
+             (lambda (rc)
+               (api-handler
+                (lambda ()
+                  (reply-success
+                   (studio-archive-character-outfit!
+                    config (params rc "workplace_id")
+                    (params rc "character_id") (params rc "outfit_id")))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/outfits/:outfit_id/default"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-set-default-character-outfit!
+             config (params rc "workplace_id") (params rc "character_id")
+             (params rc "outfit_id")))))))
+
+(put "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/outfits/:outfit_id/reference"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-set-character-outfit-reference!
+            config (params rc "workplace_id") (params rc "character_id")
+            (params rc "outfit_id") (body-json rc)))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/artworks"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-character-artworks config (params rc "workplace_id")
+                                           (params rc "character_id")))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/artworks/prompt"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-character-artwork-prompt
+             config (params rc "workplace_id") (params rc "character_id")
+             (body-json rc)))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/artworks/generate"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-generate-character-artwork!
+             config (params rc "workplace_id") (params rc "character_id")
+             (body-json rc)) 201)))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/avatar"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-set-character-avatar!
+             config (params rc "workplace_id") (params rc "character_id")
+             (body-json rc)))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/canon"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-character-canon config (params rc "workplace_id")
+                                   (params rc "character_id")))))))
+
 (get "/studio/api/v1/workplaces/:workplace_id/scenes"
      (lambda (rc)
        (api-handler

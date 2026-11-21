@@ -33,13 +33,15 @@ studio_model =
   `fake` and `sonicboom`; Studio does not introduce another inference backend.
 
 The database is initialized on first use and runs migrations through version
-`5`. The schema includes:
+`6`. The schema includes:
 
 - `studio_schema_migrations`
 - `studio_workplaces`
 - `studio_documents`
 - `studio_document_versions`
 - `studio_characters`
+- `studio_character_identity_drafts`
+- `studio_character_outfits`
 - `studio_scenes`
 - `studio_scene_cast`
 - `studio_assets`
@@ -47,8 +49,12 @@ The database is initialized on first use and runs migrations through version
 - `studio_asset_links`
 
 `studio_characters` stores a stable UUID, `workplace_id`, `name`, `role`,
-`summary`, four independent JSON identity objects, timestamps, and a nullable
-`archived_at` soft-delete marker.
+`summary`, the original `concept`, four independent JSON identity objects,
+an approved `avatar_asset_id`, timestamps, and a nullable `archived_at`
+soft-delete marker. Identity drafts are held in a physically separate table so
+an AI proposal cannot become Canon without an explicit apply request. Outfits
+are character-owned rows with JSON string arrays for components, materials,
+colours, accessories and special features.
 
 `studio_scenes` stores the structured dramatic fields plus a `storyboard` JSON
 column. Migration `5` adds this column. Storyboards remain owned by the Scene;
@@ -218,6 +224,162 @@ and belong together.
 The visual identity is author-controlled Canon. This API has no generation
 path that can modify it; future AI suggestions must be approved by the author
 before being written through this `PUT` endpoint.
+
+### Character Studio
+
+Character Studio extends the existing Character resource. A character may be
+created from a natural-language concept; AI output is stored in
+`studio_character_identity_drafts`, never directly in the Character row.
+Only an explicit draft apply writes an identity section to Canon.
+
+Create a concept-first Character:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"Sera Voss",
+    "role":"Mechanic",
+    "concept":"一个生活在蒸汽朋克世界的年轻机械师，性格独立，不喜欢依赖别人。"
+  }'
+```
+
+Generate drafts for all four identity sections. Non-empty Canon fields are
+locked: the model may fill gaps but the server removes any value aimed at a
+locked field. `format` is not used; the response is strictly parsed as JSON.
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/ai/develop \
+  -H 'Content-Type: application/json' \
+  -d '{"concept":"一个生活在蒸汽朋克世界的年轻机械师，性格独立，不喜欢依赖别人。"}'
+```
+
+Regenerate one section:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/ai/develop/visual_identity \
+  -H 'Content-Type: application/json' \
+  -d '{"instruction":"让服装更适合工坊，但不要改变已经确认的脸。"}'
+```
+
+If a draft was edited by the author, regeneration returns HTTP `409` with
+`DRAFT_PROTECTED` unless the request explicitly includes `"force":true`.
+
+List and edit drafts:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/ai/drafts
+
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/ai/drafts/visual_identity \
+  -H 'Content-Type: application/json' \
+  -d '{"content":{"face":"作者修改后的脸部 Canon。","hair":"深色短发，用黑色绳带束起。"}}'
+```
+
+Apply a draft to Canon, or discard it:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/ai/drafts/visual_identity/apply
+
+curl --noproxy '*' -X DELETE http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/ai/drafts/vocal_identity
+```
+
+Outfits are independent Character resources. The first Outfit becomes the
+default automatically; choosing another default clears the previous one in
+the same transaction.
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/outfits \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"Standard Outfit",
+    "kind":"standard",
+    "description":"工坊里的标准工作装。",
+    "components":["long charcoal coat","reinforced trousers","leather apron"],
+    "materials":["waxed canvas","leather","brass"],
+    "colors":["charcoal","oxblood","aged brass"],
+    "accessories":["brass thumb guard"],
+    "special_features":["reinforced left sleeve"],
+    "image_prompt":"Practical steampunk workwear, visible repairs, no decorative glow."
+  }'
+
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/outfits
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/outfits/$OUTFIT_ID
+```
+
+Update, archive or select the default Outfit:
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/outfits/$OUTFIT_ID \
+  -H 'Content-Type: application/json' \
+  -d '{"description":"工坊标准装，左袖有加厚护片。"}'
+
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/outfits/$OUTFIT_ID/default
+
+curl --noproxy '*' -X DELETE http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/outfits/$OUTFIT_ID
+```
+
+Archiving is a soft delete. If the archived Outfit was the default, the next
+active Outfit becomes default. Character identity is never changed by Outfit
+updates.
+
+#### Character Artwork
+
+Artwork Prompt composition uses the approved Visual Identity, the selected
+Outfit, the composition requirements for the artwork type and optional author
+direction. Supported types are `avatar`, `full_body`, `character_sheet`,
+`expression_sheet` and `outfit`. The composed prompt is returned for review and
+editing before generation:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/artworks/prompt \
+  -H 'Content-Type: application/json' \
+  -d '{"artwork_type":"full_body","outfit_id":"'"$OUTFIT_ID"'","extra_description":"站在工坊窗边，午后侧光。"}'
+```
+
+Generate one still image. The existing `engine-run-t2i` adapter is used through
+`comfy-render-image!`; this endpoint does not introduce another image engine.
+The finished PNG is stored in the existing Asset library, linked to the
+Character, and annotated in `generation_metadata` with artwork type, Character
+ID, Outfit ID, model information and the final prompt:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/artworks/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"artwork_type":"full_body","outfit_id":"'"$OUTFIT_ID"'","prompt":"<edited prompt>"}'
+```
+
+List Character artwork Assets:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/artworks
+```
+
+Generation never overwrites an older Asset and never writes Character Canon.
+Repeated generation creates a new Asset.
+
+Approve an image as the formal Avatar, or as an Outfit reference image:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/avatar \
+  -H 'Content-Type: application/json' \
+  -d '{"asset_id":"'"$ASSET_ID"'"}'
+
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/outfits/$OUTFIT_ID/reference \
+  -H 'Content-Type: application/json' \
+  -d '{"asset_id":"'"$ASSET_ID"'"}'
+```
+
+Both endpoints require an image Asset from the same Workplace that is already
+linked to this Character. Cross-Workplace Assets return `404`/`422`.
+
+Read the consolidated author-approved Canon view:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/canon
+```
+
+It returns the Character identity, approved Avatar Asset, active Outfits and
+any pending AI drafts. Drafts are explicitly not Canon.
 
 ## Scenes and Casting
 
@@ -712,10 +874,10 @@ The continuation prompt lives in `conf/studio-prompts/continue.md`.
 | Status | Meaning |
 |---:|---|
 | `200` | Success. |
-| `201` | Workplace, Character, Scene, Asset, link, document, or version created. |
+| `201` | Workplace, Character, Outfit, Artwork Asset, Scene, Asset, link, document, or version created. |
 | `400` | Invalid JSON, UUID, enum, string, or numeric input. |
 | `404` | Workplace, Character, Scene, Asset, document, version, or managed file not found. |
-| `409` | `REVISION_CONFLICT`; the response includes `current_revision`. |
+| `409` | `REVISION_CONFLICT` (with `current_revision`) or `DRAFT_PROTECTED` when AI regeneration would overwrite an author-edited identity draft. |
 | `413` | Request body exceeds 4 MiB or an uploaded Asset exceeds `studio_asset_max_bytes`. |
 | `422` | Invalid resource state, such as a parent or Asset link target from another Workplace. |
 | `502` | Generation failed. |
@@ -734,9 +896,12 @@ http://127.0.0.1:3000/studio
 ```
 
 The React bundle in `studio-ui/` loads Workplaces, documents, Characters,
-Scenes, and Assets from this API. The Characters workspace creates and edits
-the four identity sections independently, persists them to SQLite, and
-archives characters with a soft delete. Writing continues to autosave with
+Scenes, and Assets from this API. Character Studio supports concept-first
+creation, AI identity drafts with per-section review/regeneration, independent
+identity saves, Outfit management, artwork Prompt review, single-image
+generation, Avatar/Outfit-reference approval and a Canon view. Drafts are
+visually and structurally separate from Canon, and generated artwork never
+changes identity by itself. Writing continues to autosave with
 `expected_revision`, request inspiration, consume continuation SSE, and insert
 accepted text only after the author approves it.
 
@@ -764,6 +929,7 @@ Run the persistence and HTTP integration suite with the fake engine:
 ```sh
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/persistence.scm
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/storyboard.scm
+GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/character_studio.scm
 ./test/studio/run.sh
 ```
 
@@ -772,4 +938,10 @@ Artanis twice, and checks document, Character, Scene, Cast, Storyboard,
 generated-image Assets, Asset metadata, tags, managed file bytes, missing-file
 errors, upload limits, temporary-file cleanup, strict AI storyboard schema
 validation, author-edit/generated-image regeneration protection, explicit
-acknowledgement, and links across a restart. It never enables SonicBoom.
+acknowledgement, Character Studio drafts and locked-Canon handling, Outfit
+default/reference transactions, fake image generation, Avatar approval, and
+links across a restart. When Playwright is installed under `ui/node_modules`,
+the same run also drives the bundled `/studio` page through concept-first
+Character creation, draft approval, Outfit creation, fake artwork generation,
+Avatar approval and a browser reload. It never enables SonicBoom or real GPU
+image generation; the fake image adapter produces a real PNG without a GPU.

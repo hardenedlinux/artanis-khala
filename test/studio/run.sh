@@ -58,11 +58,18 @@ fi
 
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$root/lib:$root" \
   guile "$root/test/studio/storyboard.scm"
+GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$root/lib:$root" \
+  guile "$root/test/studio/character_studio.scm"
 
 start_server
 KHALA_STUDIO_TEST_PORT="$port" KHALA_STUDIO_STATE="$state" \
   KHALA_STUDIO_TEST_ASSETS_DIR="$run_dir/studio-assets" \
   python3 "$root/test/studio/api.py"
+if command -v node >/dev/null 2>&1 && [ -f "$root/ui/node_modules/playwright/index.js" ]; then
+  KHALA_STUDIO_TEST_PORT="$port" node "$root/test/studio/browser.mjs"
+else
+  echo "Playwright is not installed under ui/node_modules; skipping browser smoke test"
+fi
 stop_server
 
 # Every Studio operation opens its own DBI connection, but a real backend
