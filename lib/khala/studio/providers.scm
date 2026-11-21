@@ -31,6 +31,14 @@
 (define (provider-fail code message . details)
   (throw 'studio-provider-error code message details))
 
+(define (with-provider-errors thunk)
+  (catch 'studio-provider-error
+    thunk
+    (lambda (key . args)
+      (if (eq? key 'studio-provider-error)
+          (apply provider-fail args)
+          (apply throw key args)))))
+
 (define (object? value) (and (list? value) (every pair? value)))
 (define (object-ref object key)
   (and (object? object)
@@ -525,7 +533,7 @@
                                   (connect_timeout . 15))))
                (response (studio-http-json request))
                (text (cdr response)))
-          (catch 'studio-provider-error
+          (with-provider-errors
             (lambda ()
               (if (assoc-ref request 'stream)
                   (let ((collected '()))
@@ -561,11 +569,7 @@
                                                            '("completion_tokens"
                                                              "candidatesTokenCount"
                                                              "output_tokens")))
-                      (done . ,(not (cancelled?)))))))
-            (lambda (key . args)
-              (if (eq? key 'studio-provider-error)
-                  (apply provider-fail args)
-                  (apply throw key args)))))))
+                      (done . ,(not (cancelled?)))))))))))
 
 (define (validate-vector value dimensions)
   (unless (and (list? value) (pair? value))
