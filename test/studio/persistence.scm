@@ -1,6 +1,8 @@
 (use-modules (khala config)
              (khala studio persistence)
+             (khala studio assets)
              (ice-9 format)
+             (rnrs bytevectors)
              (srfi srfi-1))
 
 (define db-path "/tmp/khala-studio-persistence.sqlite3")
@@ -20,12 +22,14 @@
   (map (lambda (entry)
          (case (car entry)
            ((studio_db) (cons 'studio_db db-path))
+           ((studio_assets_dir) (cons 'studio_assets_dir
+                                      "/tmp/khala-studio-test-assets"))
            ((engine) (cons 'engine "fake"))
            ((studio_model) (cons 'studio_model "fake"))
            (else entry)))
        (load-config)))
 
-(check 'fresh-schema (= 3 (studio-schema-version config)))
+(check 'fresh-schema (= 4 (studio-schema-version config)))
 
 (define workplace
   (studio-create-workplace! config (studio-new-id) "Persistence World"
@@ -275,6 +279,71 @@
 (check 'scenes-are-workplace-scoped
        (not (studio-get-scene config (assoc-ref other-workplace 'id) scene-id)))
 
+(define asset-id (studio-new-id))
+(define asset-storage-key (studio-asset-storage-key asset-id ".md"))
+(define asset-checksum
+  (studio-asset-store-file! config asset-storage-key
+                            (string->utf8 "# Harbor reference\n\nTide charts.")))
+(check 'asset-file-stored
+       (and (= 64 (string-length asset-checksum))
+            (studio-asset-resolve-path config asset-storage-key)))
+(define asset
+  (studio-create-asset! config asset-id workplace-id
+                        `((name . "Harbor reference")
+                          (description . "Tide charts used by the scene.")
+                          (asset_type . "document")
+                          (storage_key . ,asset-storage-key)
+                          (original_filename . "harbor.md")
+                          (mime_type . "text/markdown")
+                          (file_size . 31)
+                          (checksum . ,asset-checksum)
+                          (source . "upload")
+                          (tags . ("reference" "harbor")))))
+(check 'asset-created
+       (and asset-id
+            (equal? (assoc-ref asset 'name) "Harbor reference")
+            (equal? (assoc-ref asset 'tags) '("harbor" "reference"))))
+(check 'asset-listed
+       (equal? (map (lambda (entry) (assoc-ref entry 'id))
+                    (studio-list-assets config workplace-id))
+               (list asset-id)))
+(check 'assets-are-workplace-scoped
+       (not (studio-get-asset config (assoc-ref other-workplace 'id) asset-id)))
+
+(define updated-asset
+  (studio-update-asset! config workplace-id asset-id
+                        `((description . "Verified tide charts."))
+                        #:tags '("reference" "harbor" "approved")))
+(check 'asset-updated
+       (and (equal? (assoc-ref updated-asset 'description)
+                    "Verified tide charts.")
+            (equal? (assoc-ref updated-asset 'tags)
+                    '("approved" "harbor" "reference"))))
+
+(define second-asset
+  (studio-create-asset! config (studio-new-id) workplace-id
+                        `((name . "Lighthouse sketch")
+                          (description . "A loose visual reference.")
+                          (asset_type . "image")
+                          (source . "generated")
+                          (generation_metadata . "{\"model\":\"test\"}")
+                          (tags . ("visual")))))
+(define second-asset-id (assoc-ref second-asset 'id))
+(studio-add-asset-link! config workplace-id asset-id "character" character-id)
+(studio-add-asset-link! config workplace-id asset-id "scene" scene-id)
+(studio-add-asset-link! config workplace-id asset-id "document" document-id)
+(studio-add-asset-link! config workplace-id second-asset-id "character" character-id)
+(check 'asset-links-multiple-resources
+       (= 3 (length (studio-list-asset-links config workplace-id asset-id))))
+(check 'resource-links-multiple-assets
+       (= 2 (length (studio-list-linked-assets config workplace-id
+                                               "character" character-id))))
+(check 'same-asset-linked-once
+       (begin
+         (studio-add-asset-link! config workplace-id asset-id
+                                 "character" character-id)
+         (= 3 (length (studio-list-asset-links config workplace-id asset-id)))))
+
 (define deleted-at (studio-delete-scene! config workplace-id scene-id))
 (check 'scene-soft-deleted
        (and deleted-at
@@ -288,6 +357,11 @@
                                                  second-scene-id)))))
 (check 'scene-delete-is-not-repeated
        (not (studio-delete-scene! config workplace-id scene-id)))
+(check 'scene-delete-removes-asset-links
+       (not (any (lambda (link)
+                   (and (equal? (assoc-ref link 'resource_type) "scene")
+                        (equal? (assoc-ref link 'resource_id) scene-id)))
+                 (studio-list-asset-links config workplace-id asset-id))))
 
 (define archived-at
   (studio-archive-character! config workplace-id character-id))
@@ -297,6 +371,25 @@
             (null? (studio-list-characters config workplace-id))))
 (check 'character-archive-is-not-repeated
        (not (studio-archive-character! config workplace-id character-id)))
+(check 'character-archive-removes-asset-links
+       (and (null? (studio-list-linked-assets config workplace-id
+                                             "character" character-id))
+            (= 1 (length (studio-list-asset-links config workplace-id asset-id)))))
+
+(define archived-asset
+  (studio-archive-asset! config workplace-id asset-id))
+(check 'asset-soft-deleted
+       (and archived-asset
+            (not (studio-get-asset config workplace-id asset-id))
+            (not (any (lambda (entry)
+                        (equal? (assoc-ref entry 'id) asset-id))
+                      (studio-list-assets config workplace-id)))))
+(check 'asset-delete-clears-links
+       (null? (studio-list-linked-assets config workplace-id
+                                         "document" document-id)))
+(check 'asset-delete-is-not-repeated
+       (not (studio-archive-asset! config workplace-id asset-id)))
+(studio-asset-delete-file! config asset-storage-key)
 
 (cleanup)
 (format #t "studio persistence tests passed~%")

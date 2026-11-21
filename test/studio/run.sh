@@ -17,6 +17,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 sed -e "s|^studio_db = .*|studio_db = $run_dir/studio.sqlite3|" \
+    -e "s|^studio_assets_dir = .*|studio_assets_dir = $run_dir/studio-assets|" \
     -e "s|^history_db = .*|history_db = $run_dir/history.sqlite3|" \
     -e 's|^engine = .*|engine = fake|' \
     -e 's|^studio_model = .*|studio_model = fake|' \
@@ -57,6 +58,7 @@ fi
 
 start_server
 KHALA_STUDIO_TEST_PORT="$port" KHALA_STUDIO_STATE="$state" \
+  KHALA_STUDIO_TEST_ASSETS_DIR="$run_dir/studio-assets" \
   python3 "$root/test/studio/api.py"
 stop_server
 

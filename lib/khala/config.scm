@@ -17,6 +17,8 @@
     (persist_queue . #f)
     (history_db . "var/history.sqlite3")
     (studio_db . "var/studio.sqlite3")
+    (studio_assets_dir . "var/studio-assets")
+    (studio_asset_max_bytes . 4194304)
     (studio_model . "")
     (extra_model_paths . "")
     (mirror . "auto")
@@ -33,6 +35,7 @@
   (let ((value (string-trim-both text)))
     (cond
      ((member key '(port download_threads download_chunk_mib mirror_probe_bytes
+                         studio_asset_max_bytes
                          mirror_probe_timeout mirror_cache_minutes))
       (or (string->number value) 0))
      ((member key '(persist_history persist_queue))

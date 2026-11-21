@@ -11,6 +11,7 @@
   #:use-module (app models ollama)
   #:use-module (khala config)
   #:use-module (khala json)
+  #:use-module ((khala studio assets) #:prefix fs:)
   #:use-module ((khala studio persistence) #:prefix db:)
   #:export (studio-capabilities
             studio-list-workplaces
@@ -29,6 +30,17 @@
             studio-delete-scene!
             studio-list-scene-cast
             studio-update-scene-cast!
+            studio-list-assets
+            studio-create-asset!
+            studio-get-asset
+            studio-update-asset!
+            studio-delete-asset!
+            studio-create-uploaded-asset!
+            studio-list-asset-links
+            studio-add-asset-link!
+            studio-remove-asset-link!
+            studio-list-resource-assets
+            studio-asset-file-info
             studio-list-documents
             studio-create-document!
             studio-get-document
@@ -791,6 +803,477 @@
                        "Every cast Character must belong to this Workplace"))
             (else (api-fail 422 "INVALID_CAST"
                           "The cast could not be updated"))))))))
+
+(define asset-types '("image" "audio" "video" "document" "other"))
+(define asset-sources '("generated" "imported"))
+(define asset-resource-types '("character" "scene" "document"))
+(define max-asset-name-length 512)
+(define max-asset-description-length 4000)
+(define max-asset-author-length 512)
+(define max-asset-notes-length 20000)
+(define max-asset-tag-length 64)
+(define max-asset-tags 32)
+
+(define (asset-type-field body default)
+  (let ((value (string-field body "asset_type" #:allow-empty #t
+                             #:default default #:max 32)))
+    (unless (member value asset-types)
+      (api-fail 400 "VALIDATION_ERROR" "asset_type is not supported"))
+    value))
+
+(define (asset-source-field body default)
+  (let ((value (string-field body "source" #:allow-empty #t
+                             #:default default #:max 32)))
+    (unless (member value asset-sources)
+      (api-fail 400 "VALIDATION_ERROR"
+                "source must be generated or imported"))
+    value))
+
+(define (json-array-values value label)
+  (cond
+   ((vector? value) (vector->list value))
+   ((null? value) '())
+   ((object? value) (api-fail 400 "VALIDATION_ERROR"
+                              (format #f "~a must be an array" label)))
+   ((list? value) value)
+   (else (api-fail 400 "VALIDATION_ERROR"
+                   (format #f "~a must be an array" label)))))
+
+(define (normalize-tags values)
+  (when (> (length values) max-asset-tags)
+    (api-fail 400 "VALIDATION_ERROR" "Too many Asset tags"))
+  (let loop ((rest values) (result '()))
+    (if (null? rest)
+        (reverse result)
+        (let ((tag (car rest)))
+          (unless (string? tag)
+            (api-fail 400 "VALIDATION_ERROR" "Every tag must be a string"))
+          (let ((tag (string-trim-both tag)))
+            (when (> (string-length tag) max-asset-tag-length)
+              (api-fail 400 "VALIDATION_ERROR" "Asset tag is too large"))
+            (if (or (string-null? tag) (member tag result string=?))
+                (loop (cdr rest) result)
+                (loop (cdr rest) (cons tag result))))))))
+
+(define* (asset-tags-value body #:key (default '()))
+  (if (object-has? body "tags")
+      (normalize-tags (json-array-values (object-ref body "tags") "tags"))
+      default))
+
+(define (asset-tags-from-form body)
+  (if (not (object-has? body "tags"))
+      '()
+      (let ((value (object-ref body "tags")))
+        (cond
+         ((string? value)
+          (let ((trimmed (string-trim-both value)))
+            (if (string-prefix? "[" trimmed)
+                (catch #t
+                  (lambda ()
+                    (normalize-tags
+                     (json-array-values (json-string->scm trimmed) "tags")))
+                  (lambda _
+                    (api-fail 400 "VALIDATION_ERROR" "tags must be valid JSON")))
+                (normalize-tags
+                 (filter (lambda (tag) (not (string-null? tag)))
+                         (map string-trim-both (string-split value #\,)))))))
+         (else (normalize-tags (json-array-values value "tags")))))))
+
+(define (generation-metadata-from-body body)
+  (if (not (object-has? body "generation_metadata"))
+      "{}"
+      (let* ((raw (object-ref body "generation_metadata"))
+             (value (if (string? raw)
+                        (catch #t
+                          (lambda () (json-string->scm raw))
+                          (lambda _
+                            (api-fail 400 "VALIDATION_ERROR"
+                                      "generation_metadata must be valid JSON")))
+                        raw)))
+        (unless (or (not value) (object? value))
+          (api-fail 400 "VALIDATION_ERROR"
+                    "generation_metadata must be an object"))
+        (if (not value)
+            "{}"
+            (let ((encoded (json-encode (json-normalize value))))
+              (when (> (string-length encoded) 20000)
+                (api-fail 400 "VALIDATION_ERROR"
+                          "generation_metadata is too large"))
+              encoded)))))
+
+(define (nullable-integer-field body key min max)
+  (if (not (object-has? body key))
+      #f
+      (let ((value (object-ref body key)))
+        (cond
+         ((not value) #f)
+         ((not (integer? value))
+          (api-fail 400 "VALIDATION_ERROR"
+                    (format #f "~a must be an integer or null" key)))
+         ((or (< value min) (> value max))
+          (api-fail 400 "VALIDATION_ERROR"
+                    (format #f "~a is out of range" key)))
+         (else value)))))
+
+(define (form-integer-field body key min max)
+  (if (not (object-has? body key))
+      #f
+      (let ((value (object-ref body key)))
+        (cond
+         ((not value) #f)
+         ((integer? value)
+          (if (and (>= value min) (<= value max))
+              value
+              (api-fail 400 "VALIDATION_ERROR"
+                        (format #f "~a is out of range" key))))
+         ((string? value)
+          (let ((number (string->number (string-trim-both value))))
+            (if (and number (integer? number) (>= number min) (<= number max))
+                number
+                (api-fail 400 "VALIDATION_ERROR"
+                          (format #f "~a must be an integer" key)))))
+         (else (api-fail 400 "VALIDATION_ERROR"
+                         (format #f "~a must be an integer" key)))))))
+
+(define (asset-safe-mime? value)
+  (and (string? value)
+       (not (string-null? value))
+       (<= (string-length value) 255)
+       (every (lambda (char)
+                (or (char-alphabetic? char)
+                    (char-numeric? char)
+                    (member char '(#\/ #\+ #\- #\. #\; #\space))))
+              (string->list value))))
+
+(define (require-asset config workplace-id asset-id)
+  (let* ((id (require-uuid-in-path asset-id "Asset"))
+         (asset (db:studio-get-asset config workplace-id id)))
+    (or asset
+        (api-fail 404 "NOT_FOUND" "Asset not found"))))
+
+(define (public-asset-link config workplace-id link)
+  (let* ((type (assoc-ref link 'resource_type))
+         (id (assoc-ref link 'resource_id))
+         (target (case (string->symbol type)
+                   ((character) (db:studio-get-character config workplace-id id))
+                   ((scene) (db:studio-get-scene config workplace-id id))
+                   ((document) (db:studio-get-document config workplace-id id))
+                   (else #f)))
+         (name (and target
+                    (or (assoc-ref target 'name)
+                        (assoc-ref target 'title)
+                        ""))))
+    `(("resource_type" . ,type)
+      ("resource_id" . ,id)
+      ("name" . ,(or name ""))
+      ("available" . ,(and target #t))
+      ("created_at" . ,(assoc-ref link 'created_at)))))
+
+(define (asset-links-for config workplace-id asset-id)
+  (map (lambda (link) (public-asset-link config workplace-id link))
+       (db:studio-list-asset-links config workplace-id asset-id)))
+
+(define (asset-generation-metadata value)
+  (if (or (not (string? value)) (string-null? value))
+      (make-json-object '())
+      (catch #t
+        (lambda ()
+          (let ((parsed (json-string->scm value)))
+            (cond
+             ((null? parsed) (make-json-object '()))
+             ((object? parsed) parsed)
+             (else (make-json-object '())))))
+        (lambda _ (make-json-object '())))))
+
+(define* (public-asset asset #:key (include-links #f) config)
+  (let* ((storage-key (assoc-ref asset 'storage_key))
+         (workplace-id (assoc-ref asset 'workplace_id))
+         (asset-id (assoc-ref asset 'id))
+         (has-file (and storage-key (not (string-null? storage-key)) #t)))
+    `(("id" . ,asset-id)
+      ("workplace_id" . ,workplace-id)
+      ("name" . ,(assoc-ref asset 'name))
+      ("description" . ,(assoc-ref asset 'description))
+      ("asset_type" . ,(assoc-ref asset 'asset_type))
+      ("storage_key" . ,storage-key)
+      ("has_file" . ,(and has-file #t))
+      ("file_url" . ,(mark (and has-file
+                                (format #f "/studio/api/v1/workplaces/~a/assets/~a/file"
+                                        workplace-id asset-id))))
+      ("original_filename" . ,(assoc-ref asset 'original_filename))
+      ("mime_type" . ,(assoc-ref asset 'mime_type))
+      ("file_size" . ,(assoc-ref asset 'file_size))
+      ("checksum" . ,(assoc-ref asset 'checksum))
+      ("source" . ,(assoc-ref asset 'source))
+      ("width" . ,(mark (assoc-ref asset 'width)))
+      ("height" . ,(mark (assoc-ref asset 'height)))
+      ("duration_ms" . ,(mark (assoc-ref asset 'duration_ms)))
+      ("author" . ,(assoc-ref asset 'author))
+      ("notes" . ,(assoc-ref asset 'notes))
+      ("tags" . ,(assoc-ref asset 'tags))
+      ("generation_metadata"
+       . ,(asset-generation-metadata (assoc-ref asset 'generation_metadata)))
+      ("created_at" . ,(assoc-ref asset 'created_at))
+      ("updated_at" . ,(assoc-ref asset 'updated_at))
+      ("archived_at" . ,(mark (assoc-ref asset 'archived_at)))
+      ("links" . ,(if include-links
+                       (asset-links-for config workplace-id asset-id)
+                       '())))))
+
+(define (asset-common-values body source default-name)
+  (let ((name (string-field body "name" #:required (not default-name)
+                            #:max max-asset-name-length
+                            #:default (or default-name "")))
+        (original (string-field body "original_filename" #:allow-empty #t
+                                #:default "" #:max 512))
+        (mime (string-field body "mime_type" #:allow-empty #t
+                            #:default "application/octet-stream" #:max 255)))
+    (unless (asset-safe-mime? mime)
+      (api-fail 400 "VALIDATION_ERROR" "mime_type is invalid"))
+    (when (and (not (string-null? original))
+               (or (string-contains original "/")
+                   (string-contains original "\\")
+                   (string-contains original "..")))
+      (api-fail 400 "VALIDATION_ERROR" "original_filename is invalid"))
+    `((name . ,name)
+      (description . ,(string-field body "description" #:allow-empty #t
+                                    #:default ""
+                                    #:max max-asset-description-length))
+      (asset_type . ,(asset-type-field body "other"))
+      (original_filename . ,original)
+      (mime_type . ,mime)
+      (source . ,source)
+      (width . ,(nullable-integer-field body "width" 1 100000))
+      (height . ,(nullable-integer-field body "height" 1 100000))
+      (duration_ms . ,(nullable-integer-field body "duration_ms" 0 1000000000))
+      (author . ,(string-field body "author" #:allow-empty #t
+                               #:default "" #:max max-asset-author-length))
+      (notes . ,(string-field body "notes" #:allow-empty #t
+                              #:default "" #:max max-asset-notes-length))
+      (generation_metadata . ,(generation-metadata-from-body body))
+      (tags . ,(asset-tags-from-form body)))))
+
+(define (studio-list-assets config workplace-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id)))
+    (map (lambda (asset) (public-asset asset #:config config))
+         (db:studio-list-assets config wid))))
+
+(define (studio-create-asset! config workplace-id body)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id)))
+    (when (or (object-has? body "storage_key")
+              (object-has? body "checksum")
+              (object-has? body "file_size"))
+      (api-fail 400 "VALIDATION_ERROR"
+                "File fields are managed by the server"))
+    (let* ((values (asset-common-values body (asset-source-field body "imported")
+                                        #f))
+           (values (append `((storage_key . "")
+                             (file_size . 0)
+                             (checksum . ""))
+                           values)))
+      (public-asset
+       (db:studio-create-asset! config (db:studio-new-id) wid values)
+       #:config config))))
+
+(define (studio-get-asset config workplace-id asset-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (asset (require-asset config wid asset-id)))
+    (public-asset asset #:include-links #t #:config config)))
+
+(define (studio-update-asset! config workplace-id asset-id body)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (asset (require-asset config wid asset-id))
+         (id (assoc-ref asset 'id))
+         (updates '()))
+    (when (object-has? body "name")
+      (set! updates
+            (acons 'name (string-field body "name" #:required #t
+                                       #:max max-asset-name-length)
+                   updates)))
+    (when (object-has? body "description")
+      (set! updates
+            (acons 'description
+                   (string-field body "description" #:allow-empty #t
+                                 #:default ""
+                                 #:max max-asset-description-length)
+                   updates)))
+    (when (object-has? body "author")
+      (set! updates
+            (acons 'author (string-field body "author" #:allow-empty #t
+                                         #:default ""
+                                         #:max max-asset-author-length)
+                   updates)))
+    (when (object-has? body "notes")
+      (set! updates
+            (acons 'notes (string-field body "notes" #:allow-empty #t
+                                        #:default ""
+                                        #:max max-asset-notes-length)
+                   updates)))
+    (for-each
+     (lambda (entry)
+       (when (object-has? body (car entry))
+         (set! updates
+               (acons (string->symbol (car entry))
+                      (nullable-integer-field body (car entry)
+                                              (cadr entry) (caddr entry))
+                      updates))))
+     '(("width" 1 100000) ("height" 1 100000)
+       ("duration_ms" 0 1000000000)))
+    (when (object-has? body "generation_metadata")
+      (set! updates
+            (acons 'generation_metadata
+                   (generation-metadata-from-body body)
+                   updates)))
+    (let ((tags (if (object-has? body "tags")
+                    (asset-tags-value body)
+                    #f)))
+      (public-asset
+       (db:studio-update-asset! config wid id updates #:tags tags)
+       #:include-links #t #:config config))))
+
+(define (studio-delete-asset! config workplace-id asset-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (asset (require-asset config wid asset-id))
+         (archived (db:studio-archive-asset! config wid
+                                              (assoc-ref asset 'id))))
+    (unless archived
+      (api-fail 404 "NOT_FOUND" "Asset not found"))
+    (fs:studio-asset-delete-file! config (or (assoc-ref archived 'storage_key) ""))
+    `(("id" . ,(assoc-ref archived 'id))
+      ("workplace_id" . ,(assoc-ref archived 'workplace_id))
+      ("archived_at" . ,(assoc-ref archived 'archived_at)))))
+
+(define (studio-create-uploaded-asset! config workplace-id id filename mime bytes fields)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (type (string-field fields "asset_type" #:allow-empty #t
+                             #:default "" #:max 32))
+         (fields (fold
+                  (lambda (key result)
+                    (let ((value (object-ref result key)))
+                      (if (string? value)
+                          (let ((number (string->number (string-trim-both value))))
+                            (if (integer? number)
+                                (acons key number
+                                       (alist-delete key result equal?))
+                                result))
+                          result)))
+                  fields
+                  '("width" "height" "duration_ms")))
+         (validated
+          (catch 'studio-asset-error
+            (lambda ()
+              (fs:studio-asset-validate-upload config filename mime bytes type))
+            (lambda (key code message)
+              (api-fail (if (eq? code 'file-too-large) 413 400)
+                        (string-upcase
+                         (string-map (lambda (char)
+                                       (if (char=? char #\-) #\_ char))
+                                     (symbol->string code)))
+                        message))))
+         (extension (assoc-ref validated 'extension))
+         (storage-key (fs:studio-asset-storage-key id extension))
+         (basename (basename filename))
+         (dot (string-rindex basename #\.))
+         (default-name (if (and dot (> dot 0)) (substring basename 0 dot) basename))
+         (values (asset-common-values
+                  (acons "name" (or (object-ref fields "name") default-name)
+                         (alist-delete "name" fields equal?))
+                  "upload" default-name))
+         (values (append validated
+                         `((storage_key . ,storage-key)
+                           (source . "upload"))
+                         (filter (lambda (entry) (not (assoc (car entry) validated)))
+                                 values)))
+         (checksum (fs:studio-asset-store-file! config storage-key bytes)))
+    (catch #t
+      (lambda ()
+        (public-asset
+         (db:studio-create-asset! config id wid
+                                  (acons 'checksum checksum values))
+         #:config config))
+      (lambda (key . args)
+        (fs:studio-asset-delete-file! config storage-key)
+        (apply throw key args)))))
+
+(define (resource-type-field body)
+  (let ((value (string-field body "resource_type" #:required #t #:max 32)))
+    (unless (member value asset-resource-types)
+      (api-fail 400 "VALIDATION_ERROR" "resource_type is not supported"))
+    value))
+
+(define (require-link-target config workplace-id resource-type resource-id)
+  (let ((id (require-uuid-in-path resource-id "Resource")))
+    (unless (member resource-type asset-resource-types)
+      (api-fail 400 "VALIDATION_ERROR" "resource_type is not supported"))
+    (let ((target (case (string->symbol resource-type)
+                    ((character) (db:studio-get-character config workplace-id id))
+                    ((scene) (db:studio-get-scene config workplace-id id))
+                    ((document) (db:studio-get-document config workplace-id id))
+                    (else #f))))
+      (unless target
+        (api-fail 422 "INVALID_RESOURCE"
+                  "The target resource does not belong to this Workplace"))
+      id)))
+
+(define (studio-list-asset-links config workplace-id asset-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (asset (require-asset config wid asset-id)))
+    (asset-links-for config wid (assoc-ref asset 'id))))
+
+(define (studio-add-asset-link! config workplace-id asset-id body)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (asset (require-asset config wid asset-id))
+         (resource-type (resource-type-field body))
+         (resource-id (require-link-target
+                       config wid resource-type
+                       (string-field body "resource_id" #:required #t #:max 36))))
+    (public-asset-link
+     config wid
+     (catch 'studio-asset-link-error
+       (lambda ()
+         (db:studio-add-asset-link! config wid (assoc-ref asset 'id)
+                                    resource-type resource-id))
+       (lambda (key reason)
+         (if (eq? reason 'asset-not-found)
+             (api-fail 404 "NOT_FOUND" "Asset not found")
+             (api-fail 422 "INVALID_RESOURCE" "Asset link could not be created")))))))
+
+(define (studio-remove-asset-link! config workplace-id asset-id resource-type resource-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (asset (require-asset config wid asset-id))
+         (resource-id (require-link-target config wid resource-type resource-id))
+         (removed (db:studio-remove-asset-link! config wid (assoc-ref asset 'id)
+                                                resource-type resource-id)))
+    `(("asset_id" . ,(assoc-ref asset 'id))
+      ("resource_type" . ,resource-type)
+      ("resource_id" . ,resource-id)
+      ("removed" . ,(and removed #t)))))
+
+(define (studio-list-resource-assets config workplace-id resource-type resource-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (id (require-link-target config wid resource-type resource-id)))
+    (map (lambda (asset) (public-asset asset #:config config))
+         (db:studio-list-linked-assets config wid resource-type id))))
+
+(define (studio-asset-file-info config workplace-id asset-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (asset (require-asset config wid asset-id))
+         (path (fs:studio-asset-resolve-path config
+                                             (assoc-ref asset 'storage_key))))
+    (unless path
+      (api-fail 404 "ASSET_FILE_MISSING" "Asset file is unavailable"))
+    `((asset . ,asset) (path . ,path))))
 
 (define (studio-list-documents config workplace-id)
   (let ((workplace (require-workplace config workplace-id)))

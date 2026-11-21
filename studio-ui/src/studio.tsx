@@ -79,6 +79,23 @@ interface SceneDraft {
   dramatic_situation: SceneDramaticSituation;
   dialogue: string; direction: SceneDirection;
 }
+type AssetType = "image" | "audio" | "video" | "document" | "other";
+type AssetResourceType = "character" | "scene" | "document";
+interface AssetLink {
+  resource_type: AssetResourceType; resource_id: string; name: string;
+  available: boolean; created_at: string;
+}
+interface StudioAsset {
+  id: string; workplace_id: string; name: string; description: string;
+  asset_type: AssetType; storage_key: string; has_file: boolean;
+  file_url: string | null; original_filename: string; mime_type: string;
+  file_size: number; checksum: string; source: "upload" | "generated" | "imported";
+  width: number | null; height: number | null; duration_ms: number | null;
+  author: string; notes: string; tags: string[];
+  generation_metadata: Record<string, unknown>; created_at: string;
+  updated_at: string; archived_at: string | null; links: AssetLink[];
+}
+interface AssetDraft { name: string; description: string; author: string; notes: string; tags: string }
 interface PageSpread { left: string; right: string }
 type Section = "writing" | "characters" | "scenes" | "assets" | "settings";
 type SaveState = "已保存" | "正在保存…" | "版本冲突" | "保存失败" | "AI 生成中";
@@ -229,6 +246,17 @@ async function api<T>(path: string, options: { method?: string; body?: unknown; 
   return payload?.data as T;
 }
 
+async function uploadAsset(workplaceId: string, form: FormData): Promise<StudioAsset> {
+  const response = await fetch(`${API_BASE}/workplaces/${workplaceId}/assets/upload`, {
+    method: "POST",
+    body: form,
+  });
+  let payload: any = null;
+  try { payload = await response.json(); } catch { payload = null; }
+  if (!response.ok) throw new StudioApiError(response.status, payload);
+  return payload?.data as StudioAsset;
+}
+
 function escapeHtml(value: string): string {
   return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -308,6 +336,78 @@ function fmtDate(value?: string | null): string {
 function folio(value: number): string { return `— ${String(value).padStart(3, "0")} —`; }
 function colorMeta(color: string) { return COVER_PALETTE.find(item => item.color.toLowerCase() === (color || "").toLowerCase()) || COVER_PALETTE[0]; }
 
+const ASSET_TYPE_INFO: Record<AssetType, { label: string; en: string; icon: string }> = {
+  image: { label: "图片", en: "IMAGE", icon: "image" },
+  audio: { label: "音频", en: "AUDIO", icon: "audio" },
+  video: { label: "视频", en: "VIDEO", icon: "video" },
+  document: { label: "文档", en: "DOCUMENT", icon: "file" },
+  other: { label: "其他", en: "OTHER", icon: "file" },
+};
+const ASSET_RESOURCE_INFO: Record<AssetResourceType, { label: string; plural: string }> = {
+  character: { label: "Character", plural: "characters" },
+  scene: { label: "Scene", plural: "scenes" },
+  document: { label: "Document", plural: "documents" },
+};
+
+function formatBytes(value: number): string {
+  if (!value) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value; let index = 0;
+  while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
+  return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
+}
+function formatDuration(value: number | null): string {
+  if (value === null || value === undefined) return "";
+  const seconds = Math.max(0, Math.round(value / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+function assetMediaMeta(asset: StudioAsset): string {
+  const parts: string[] = [];
+  if (asset.width && asset.height) parts.push(`${asset.width}×${asset.height}`);
+  if (asset.duration_ms !== null) parts.push(formatDuration(asset.duration_ms));
+  if (asset.file_size) parts.push(formatBytes(asset.file_size));
+  return parts.join(" · ");
+}
+function resourcePath(type: AssetResourceType): string { return ASSET_RESOURCE_INFO[type].plural; }
+
+function inspectMedia(file: File): Promise<{ width?: number; height?: number; duration_ms?: number }> {
+  return new Promise(resolve => {
+    if (!file.type.startsWith("image/") && !file.type.startsWith("audio/") && !file.type.startsWith("video/")) {
+      resolve({}); return;
+    }
+    const url = URL.createObjectURL(file);
+    let settled = false;
+    const finish = (value: { width?: number; height?: number; duration_ms?: number }) => {
+      if (settled) return;
+      settled = true; URL.revokeObjectURL(url); resolve(value);
+    };
+    const timer = window.setTimeout(() => finish({}), 5000);
+    try {
+      if (file.type.startsWith("image/")) {
+        const image = new Image();
+        image.onload = () => { window.clearTimeout(timer); finish({ width: image.naturalWidth, height: image.naturalHeight }); };
+        image.onerror = () => { window.clearTimeout(timer); finish({}); };
+        image.src = url;
+      } else {
+        const media = document.createElement(file.type.startsWith("audio/") ? "audio" : "video");
+        media.preload = "metadata";
+        media.onloadedmetadata = () => {
+          window.clearTimeout(timer);
+          finish({
+            width: media instanceof HTMLVideoElement ? media.videoWidth : undefined,
+            height: media instanceof HTMLVideoElement ? media.videoHeight : undefined,
+            duration_ms: Number.isFinite(media.duration) ? Math.round(media.duration * 1000) : undefined,
+          });
+        };
+        media.onerror = () => { window.clearTimeout(timer); finish({}); };
+        media.src = url;
+      }
+    } catch {
+      window.clearTimeout(timer); finish({});
+    }
+  });
+}
+
 function Icon({ name }: { name: string }) {
   const paths: Record<string, string> = {
     book: "M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 0 4 22z M4 5.5V22 M8 7h8 M8 11h8",
@@ -323,6 +423,15 @@ function Icon({ name }: { name: string }) {
     plus: "M12 5v14 M5 12h14",
     back: "M19 12H5 M12 19l-7-7 7-7",
     next: "M5 12h14 M12 5l7 7-7 7",
+    audio: "M9 18V5l10-2v13 M9 18a3 3 0 1 1-3-3 3 3 0 0 1 3 3 M19 16a3 3 0 1 1-3-3 3 3 0 0 1 3 3",
+    video: "M3 6h13v12H3z M16 10l5-3v10l-5-3",
+    file: "M6 3h8l4 4v14H6z M14 3v5h4 M9 13h6 M9 17h6",
+    grid: "M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h6v6h-6z",
+    list: "M8 6h12 M8 12h12 M8 18h12 M4 6h.01 M4 12h.01 M4 18h.01",
+    link: "M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1 M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1",
+    trash: "M4 7h16 M9 7V4h6v3 M7 7l1 13h8l1-13 M10 11v5 M14 11v5",
+    upload: "M12 16V4 M7 9l5-5 5 5 M4 16v4h16v-4",
+    image: "M4 4h16v16H4z M4 15l5-5 4 4 3-3 4 4 M9 8h.01",
   };
   return <svg className="icon" viewBox="0 0 24 24" aria-hidden="true"><path d={paths[name] || paths.sparkle}/></svg>;
 }
@@ -342,6 +451,112 @@ function Modal({ title, eyebrow, children, actions, onClose, className = "" }: {
       {actions && <div className="modal-actions">{actions}</div>}
     </section>
   </div>;
+}
+
+function AssetPreview({ asset, compact = false, interactive = false }: {
+  asset: StudioAsset; compact?: boolean; interactive?: boolean;
+}) {
+  const [broken, setBroken] = React.useState(false);
+  React.useEffect(() => setBroken(false), [asset.id, asset.updated_at]);
+  const info = ASSET_TYPE_INFO[asset.asset_type] || ASSET_TYPE_INFO.other;
+  if (asset.file_url && !broken && asset.asset_type === "image") {
+    return <div className={`asset-preview image-preview ${compact ? "compact" : ""}`}><img src={asset.file_url} alt={asset.name} loading="lazy" onError={() => setBroken(true)}/><span className="asset-type-stamp"><Icon name={info.icon}/>{info.en}</span></div>;
+  }
+  if (asset.file_url && !broken && interactive && asset.asset_type === "audio") {
+    return <div className="asset-preview native-media"><div className="asset-native-head"><Icon name="audio"/><strong>{asset.name}</strong></div><audio controls preload="metadata" src={asset.file_url} onError={() => setBroken(true)}/></div>;
+  }
+  if (asset.file_url && !broken && interactive && asset.asset_type === "video") {
+    return <div className={`asset-preview video-preview ${compact ? "compact" : ""}`}><video controls preload="metadata" src={asset.file_url} onError={() => setBroken(true)}/><span className="asset-type-stamp"><Icon name="video"/>{info.en}</span></div>;
+  }
+  return <div className={`asset-preview asset-placeholder ${compact ? "compact" : ""}`}><Icon name={info.icon}/><span>{asset.mime_type || info.en}</span>{broken && <small>文件不可读取</small>}</div>;
+}
+
+function AssetLibraryPicker({ workplaceId, resourceType, resourceId, linked, onChanged, onClose }: {
+  workplaceId: string; resourceType: AssetResourceType; resourceId: string;
+  linked: StudioAsset[]; onChanged: (assets: StudioAsset[]) => void; onClose: () => void;
+}) {
+  const [assets, setAssets] = React.useState<StudioAsset[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [busy, setBusy] = React.useState("");
+  const [error, setError] = React.useState("");
+  const linkedIds = new Set(linked.map(asset => asset.id));
+
+  React.useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    api<StudioAsset[]>(`/workplaces/${workplaceId}/assets`)
+      .then(list => { if (alive) setAssets(list); })
+      .catch((cause: any) => { if (alive) setError(cause?.message || "无法读取资源库"); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [workplaceId]);
+
+  async function toggle(asset: StudioAsset) {
+    const isLinked = linkedIds.has(asset.id);
+    setBusy(asset.id); setError("");
+    try {
+      if (isLinked) {
+        await api(`/workplaces/${workplaceId}/assets/${asset.id}/links/${resourceType}/${resourceId}`, { method: "DELETE" });
+        onChanged(linked.filter(item => item.id !== asset.id));
+      } else {
+        await api<AssetLink>(`/workplaces/${workplaceId}/assets/${asset.id}/links`, {
+          method: "POST", body: { resource_type: resourceType, resource_id: resourceId },
+        });
+        onChanged([...linked, asset]);
+      }
+    } catch (cause: any) {
+      setError(cause?.message || "无法更新资源关联");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return <div className="asset-picker">
+    <div className="asset-picker-head"><div><div className="eyebrow">ASSET LIBRARY</div><h3>从资源库选择</h3><p>关联只保存稳定 Asset ID，不复制文件或元数据。</p></div><button className="quiet-button" onClick={onClose}>收起</button></div>
+    {error && <p className="form-error">{error}</p>}
+    {loading ? <div className="asset-picker-state">正在读取资源库……</div> : !assets.length ? <div className="asset-picker-state">资源库还是空的。请先在 Assets 页面上传文件。</div> : <div className="asset-picker-grid">{assets.map(asset => {
+      const isLinked = linkedIds.has(asset.id);
+      return <article className={`asset-picker-card ${isLinked ? "linked" : ""}`} key={asset.id}>
+        <AssetPreview asset={asset} compact/>
+        <div className="asset-picker-copy"><strong>{asset.name}</strong><small>{ASSET_TYPE_INFO[asset.asset_type].label}{assetMediaMeta(asset) ? ` · ${assetMediaMeta(asset)}` : ""}</small></div>
+        <button className={isLinked ? "quiet-button" : "tool-button primary"} disabled={busy === asset.id} onClick={() => void toggle(asset)}>{busy === asset.id ? "更新中…" : isLinked ? "解除" : "关联"}</button>
+      </article>;
+    })}</div>}
+  </div>;
+}
+
+function AssetLinkPanel({ workplaceId, resourceType, resourceId, notify }: {
+  workplaceId: string; resourceType: AssetResourceType; resourceId: string; notify: (message: string) => void;
+}) {
+  const [assets, setAssets] = React.useState<StudioAsset[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState("");
+  const [picking, setPicking] = React.useState(false);
+
+  React.useEffect(() => {
+    let alive = true;
+    setLoading(true); setError(""); setPicking(false);
+    api<StudioAsset[]>(`/workplaces/${workplaceId}/${resourcePath(resourceType)}/${resourceId}/assets`)
+      .then(list => { if (alive) setAssets(list); })
+      .catch((cause: any) => { if (alive) setError(cause?.message || "无法读取关联资源"); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [workplaceId, resourceType, resourceId]);
+
+  function changed(next: StudioAsset[]) {
+    setAssets(next);
+    notify("资源关联已更新");
+  }
+
+  return <section className="asset-link-panel">
+    <div className="asset-link-panel-head"><div><div className="eyebrow">LINKED ASSETS</div><h3>{ASSET_RESOURCE_INFO[resourceType].label} 的创作资源</h3><p>标准形象、参考图、声音或其他文件都从这里复用。</p></div><button className="tool-button" onClick={() => setPicking(value => !value)}><Icon name="link"/>{picking ? "收起资源库" : "关联资源"}</button></div>
+    {error && <p className="form-error">{error}</p>}
+    {loading ? <div className="asset-inline-state">正在读取关联资源……</div> : !assets.length ? <div className="asset-inline-empty">尚未关联任何资源。文件本身独立存在于 Assets 中。</div> : <div className="linked-asset-grid">{assets.map(asset => <article className="linked-asset-card" key={asset.id}>
+      <AssetPreview asset={asset} compact interactive/>
+      <div><strong>{asset.name}</strong><small>{ASSET_TYPE_INFO[asset.asset_type].label}{assetMediaMeta(asset) ? ` · ${assetMediaMeta(asset)}` : ""}</small></div>
+    </article>)}</div>}
+    {picking && <AssetLibraryPicker workplaceId={workplaceId} resourceType={resourceType} resourceId={resourceId} linked={assets} onChanged={changed} onClose={() => setPicking(false)}/>}
+  </section>;
 }
 
 function CharactersWorkspace({ workplace, notify }: { workplace: Workplace; notify: (message: string) => void }) {
@@ -557,6 +772,7 @@ function CharactersWorkspace({ workplace, notify }: { workplace: Workplace; noti
         <div className="identity-grid">{currentSection.fields.map(field => <label key={field.key} className={`identity-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 4 : 3} value={draft.identities[currentSection.key][field.key] || ""} onChange={(event: any) => editIdentity(currentSection.key, field.key, event.target.value)}/></label>)}</div>
         <div className="identity-panel-actions"><span>{dirtySections[currentSection.key] ? "只保存这一部分，不会覆盖其他身份资料。" : "可以随时回来继续补充。"}</span><button className="tool-button primary" disabled={saving || !dirtySections[currentSection.key]} onClick={() => void saveIdentity(currentSection.key)}>保存{currentSection.title}</button></div>
       </section>
+      <AssetLinkPanel workplaceId={workplace.id} resourceType="character" resourceId={active.id} notify={notify}/>
     </>;
   }
 
@@ -884,6 +1100,7 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
       <section className="scene-section"><div className="scene-section-head"><div className="eyebrow">GIVEN CIRCUMSTANCES</div><h3>既定情境</h3><p>人物无法选择、但必须回应的条件。</p></div><div className="scene-field-grid">{SCENE_GIVEN_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={draft.given_circumstances[field.key]} onChange={(event: any) => editGiven(field.key, event.target.value)}/></label>)}</div></section>
       <section className="scene-section"><div className="scene-section-head"><div className="eyebrow">DRAMATIC SITUATION</div><h3>戏剧情境</h3><p>把空间里的压力说清楚，而不是罗列事件。</p></div><div className="scene-field-grid">{SCENE_DRAMATIC_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={draft.dramatic_situation[field.key]} onChange={(event: any) => editDramatic(field.key, event.target.value)}/></label>)}</div></section>
       {renderCastEditor()}
+      <AssetLinkPanel workplaceId={workplace.id} resourceType="scene" resourceId={active.id} notify={notify}/>
       <section className="scene-section"><div className="scene-section-head"><div><div className="eyebrow">DIALOGUE</div><h3>台词与叙事</h3><p>写下对白、潜台词与必要的叙事内容。Markdown 会作为连续文本保存。</p></div></div><textarea className="scene-manuscript" rows={12} value={draft.dialogue} onChange={(event: any) => editScene(previous => ({ ...previous, dialogue: event.target.value }))} placeholder="MARA&#10;你回来，是为了地图，还是为了那盏灯？&#10;&#10;（IL YAN 没有回答。他把钥匙放回桌上。）"/></section>
       <section className="scene-section"><div className="scene-section-head"><div className="eyebrow">DIRECTION</div><h3>调度与镜头</h3><p>动作、空间、表演与未来影像的镜头建议。</p></div><div className="scene-field-grid">{SCENE_DIRECTION_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={draft.direction[field.key]} onChange={(event: any) => editDirection(field.key, event.target.value)}/></label>)}</div></section>
       <div className="scene-save-footer"><span>场景与 Cast 分开保存。Cast 使用一次事务替换，失败时不会留下部分更新。</span><button className="tool-button primary" disabled={savingScene || !sceneDirty} onClick={() => void saveScene()}>{savingScene ? "保存中…" : "保存场景"}</button></div>
@@ -909,6 +1126,280 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
   </div>;
 }
 
+function assetDraft(asset: StudioAsset): AssetDraft {
+  return {
+    name: asset.name || "",
+    description: asset.description || "",
+    author: asset.author || "",
+    notes: asset.notes || "",
+    tags: (asset.tags || []).join(", "),
+  };
+}
+
+function draftTags(value: string): string[] {
+  return Array.from(new Set(value.split(",").map(tag => tag.trim()).filter(Boolean)));
+}
+
+function AssetTargetsEditor({ workplaceId, asset, onChange, notify }: {
+  workplaceId: string; asset: StudioAsset; onChange: (links: AssetLink[]) => void;
+  notify: (message: string) => void;
+}) {
+  const [targets, setTargets] = React.useState<{ character: StudioCharacter[]; scene: StudioScene[]; document: StudioDocument[] }>({
+    character: [], scene: [], document: [],
+  });
+  const [selection, setSelection] = React.useState("");
+  const [loading, setLoading] = React.useState(true);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  React.useEffect(() => {
+    let alive = true;
+    setLoading(true); setError("");
+    Promise.all([
+      api<StudioCharacter[]>(`/workplaces/${workplaceId}/characters`),
+      api<StudioScene[]>(`/workplaces/${workplaceId}/scenes`),
+      api<StudioDocument[]>(`/workplaces/${workplaceId}/documents`),
+    ]).then(([characters, scenes, documents]) => {
+      if (alive) setTargets({ character: characters, scene: scenes, document: documents });
+    }).catch((cause: any) => {
+      if (alive) setError(cause?.message || "无法读取可关联对象");
+    }).finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [workplaceId]);
+
+  const linkedKeys = new Set((asset.links || []).map(link => `${link.resource_type}:${link.resource_id}`));
+  const options = [
+    ...targets.character.map(item => ({ type: "character" as AssetResourceType, id: item.id, name: item.name })),
+    ...targets.scene.map(item => ({ type: "scene" as AssetResourceType, id: item.id, name: item.title })),
+    ...targets.document.map(item => ({ type: "document" as AssetResourceType, id: item.id, name: item.title })),
+  ].filter(option => !linkedKeys.has(`${option.type}:${option.id}`));
+
+  async function addLink() {
+    if (!selection || busy) return;
+    const [resourceType, resourceId] = selection.split(":") as [AssetResourceType, string];
+    setBusy(true); setError("");
+    try {
+      const link = await api<AssetLink>(`/workplaces/${workplaceId}/assets/${asset.id}/links`, {
+        method: "POST", body: { resource_type: resourceType, resource_id: resourceId },
+      });
+      onChange([...(asset.links || []), link]);
+      setSelection("");
+      notify("资源已关联");
+    } catch (cause: any) {
+      setError(cause?.message || "无法关联这个对象");
+    } finally { setBusy(false); }
+  }
+
+  async function removeLink(link: AssetLink) {
+    setBusy(true); setError("");
+    try {
+      await api(`/workplaces/${workplaceId}/assets/${asset.id}/links/${link.resource_type}/${link.resource_id}`, { method: "DELETE" });
+      onChange((asset.links || []).filter(item => item.resource_type !== link.resource_type || item.resource_id !== link.resource_id));
+      notify("资源关联已解除");
+    } catch (cause: any) {
+      setError(cause?.message || "无法解除资源关联");
+    } finally { setBusy(false); }
+  }
+
+  return <section className="asset-targets">
+    <div className="asset-targets-head"><div><div className="eyebrow">USED BY</div><h3>关联对象</h3><p>同一份资源可以同时用于多个 Character、Scene 和 Document。</p></div></div>
+    {error && <p className="form-error">{error}</p>}
+    {loading ? <div className="asset-inline-state">正在读取可关联对象……</div> : <>
+      {!(asset.links || []).length ? <div className="asset-inline-empty">还没有对象使用这份资源。</div> : <div className="asset-link-list">{(asset.links || []).map(link => <div className="asset-link-row" key={`${link.resource_type}:${link.resource_id}`}>
+        <span className="asset-link-kind">{ASSET_RESOURCE_INFO[link.resource_type]?.label || link.resource_type}</span>
+        <strong>{link.name || link.resource_id}</strong>
+        {!link.available && <small>目标已不可用</small>}
+        <button className="icon-button" aria-label="解除关联" disabled={busy} onClick={() => void removeLink(link)}><Icon name="close"/></button>
+      </div>)}</div>}
+      <div className="asset-link-add"><select value={selection} onChange={(event: any) => setSelection(event.target.value)} disabled={busy || !options.length}><option value="">选择要关联的 Character、Scene 或 Document</option>{options.map(option => <option key={`${option.type}:${option.id}`} value={`${option.type}:${option.id}`}>{ASSET_RESOURCE_INFO[option.type].label} · {option.name}</option>)}</select><button className="tool-button" disabled={!selection || busy} onClick={() => void addLink()}><Icon name="link"/>{busy ? "更新中…" : "建立关联"}</button></div>
+    </>}
+  </section>;
+}
+
+function AssetsWorkspace({ workplace, notify }: { workplace: Workplace; notify: (message: string) => void }) {
+  const [assets, setAssets] = React.useState<StudioAsset[]>([]);
+  const [active, setActive] = React.useState<StudioAsset | null>(null);
+  const [draft, setDraft] = React.useState<AssetDraft | null>(null);
+  const [view, setView] = React.useState<"grid" | "list">("grid");
+  const [typeFilter, setTypeFilter] = React.useState<"all" | AssetType>("all");
+  const [tagFilter, setTagFilter] = React.useState("all");
+  const [loading, setLoading] = React.useState(true);
+  const [detailLoading, setDetailLoading] = React.useState(false);
+  const [uploading, setUploading] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const fileInput = React.useRef<HTMLInputElement | null>(null);
+
+  React.useEffect(() => {
+    let alive = true;
+    setLoading(true); setError(""); setActive(null); setDraft(null);
+    api<StudioAsset[]>(`/workplaces/${workplace.id}/assets`)
+      .then(async list => {
+        if (!alive) return;
+        setAssets(list);
+        if (!list.length) return;
+        const detail = await api<StudioAsset>(`/workplaces/${workplace.id}/assets/${list[0].id}`);
+        if (alive) { setActive(detail); setDraft(assetDraft(detail)); }
+      })
+      .catch((cause: any) => { if (alive) setError(cause?.message || "无法读取创作资源库"); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [workplace.id]);
+
+  const dirty = !!(active && draft && (
+    draft.name !== active.name || draft.description !== active.description ||
+    draft.author !== active.author || draft.notes !== active.notes ||
+    draft.tags !== (active.tags || []).join(", ")
+  ));
+
+  async function selectAsset(assetId: string) {
+    if (active?.id === assetId) return;
+    if (dirty && !window.confirm("当前资源的编辑尚未保存。切换资源会放弃这些修改，继续吗？")) return;
+    setDetailLoading(true); setError("");
+    try {
+      const detail = await api<StudioAsset>(`/workplaces/${workplace.id}/assets/${assetId}`);
+      setActive(detail); setDraft(assetDraft(detail));
+    } catch (cause: any) {
+      setError(cause?.message || "无法打开资源");
+    } finally { setDetailLoading(false); }
+  }
+
+  async function uploadFile(file: File) {
+    if (!file || uploading) return;
+    setUploading(true); setError("");
+    try {
+      const metadata = await inspectMedia(file);
+      const form = new FormData();
+      form.append("file", file);
+      const dot = file.name.lastIndexOf(".");
+      form.append("name", dot > 0 ? file.name.slice(0, dot) : file.name);
+      if (metadata.width) form.append("width", String(metadata.width));
+      if (metadata.height) form.append("height", String(metadata.height));
+      if (metadata.duration_ms !== undefined) form.append("duration_ms", String(metadata.duration_ms));
+      const created = await uploadAsset(workplace.id, form);
+      const detail = await api<StudioAsset>(`/workplaces/${workplace.id}/assets/${created.id}`);
+      setAssets(previous => [detail, ...previous]);
+      setActive(detail); setDraft(assetDraft(detail));
+      setTypeFilter("all"); setTagFilter("all");
+      notify("文件已加入创作资源库");
+    } catch (cause: any) {
+      setError(cause?.message || "上传失败");
+    } finally {
+      setUploading(false);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  }
+
+  async function saveAsset() {
+    if (!active || !draft || saving) return;
+    const name = draft.name.trim();
+    if (!name) { setError("资源名称不能为空"); return; }
+    setSaving(true); setError("");
+    try {
+      const saved = await api<StudioAsset>(`/workplaces/${workplace.id}/assets/${active.id}`, {
+        method: "PUT",
+        body: {
+          name, description: draft.description, author: draft.author,
+          notes: draft.notes, tags: draftTags(draft.tags),
+        },
+      });
+      setActive(saved); setDraft(assetDraft(saved));
+      setAssets(previous => previous.map(asset => asset.id === saved.id ? saved : asset));
+      notify("资源信息已保存");
+    } catch (cause: any) {
+      setError(cause?.message || "保存资源失败");
+    } finally { setSaving(false); }
+  }
+
+  async function deleteAsset() {
+    if (!active || deleting) return;
+    setDeleting(true); setError("");
+    try {
+      await api(`/workplaces/${workplace.id}/assets/${active.id}`, { method: "DELETE" });
+      const remaining = assets.filter(asset => asset.id !== active.id);
+      setAssets(remaining);
+      setConfirmDelete(false);
+      if (remaining.length) {
+        const detail = await api<StudioAsset>(`/workplaces/${workplace.id}/assets/${remaining[0].id}`);
+        setActive(detail); setDraft(assetDraft(detail));
+      } else {
+        setActive(null); setDraft(null);
+      }
+      notify("资源已归档，关联记录已清理");
+    } catch (cause: any) {
+      setError(cause?.message || "删除资源失败");
+    } finally { setDeleting(false); }
+  }
+
+  function replaceLinks(links: AssetLink[]) {
+    if (!active) return;
+    const next = { ...active, links };
+    setActive(next);
+    setAssets(previous => previous.map(asset => asset.id === next.id ? { ...asset, links } : asset));
+  }
+
+  const allTags = Array.from(new Set(assets.flatMap(asset => asset.tags || []))).sort((left, right) => left.localeCompare(right, "zh-CN"));
+  const filtered = assets.filter(asset => (typeFilter === "all" || asset.asset_type === typeFilter) && (tagFilter === "all" || (asset.tags || []).includes(tagFilter)));
+
+  function renderAssetCard(asset: StudioAsset) {
+    return <article key={asset.id} role="button" tabIndex={0} className={`asset-card ${active?.id === asset.id ? "active" : ""}`} onClick={() => void selectAsset(asset.id)} onKeyDown={(event: any) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void selectAsset(asset.id); } }}>
+      <AssetPreview asset={asset} compact interactive/>
+      <div className="asset-card-copy"><span className="asset-card-kind">{ASSET_TYPE_INFO[asset.asset_type].en}</span><strong>{asset.name}</strong><small>{asset.description || asset.original_filename || "未填写说明"}</small><div className="asset-card-meta"><span>{assetMediaMeta(asset) || asset.mime_type}</span>{(asset.links || []).length > 0 && <em>{asset.links.length} 处引用</em>}</div></div>
+    </article>;
+  }
+
+  return <div className="book-stage asset-stage">
+    <div className="book-topline">
+      <div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace.title}</span><span className="top-separator">/</span><span className="document-crumb">CREATIVE ASSETS</span></div>
+      <div className="book-actions"><span className="character-count">{assets.length} 份资源</span><button className="head-btn" disabled={uploading} onClick={() => fileInput.current?.click()}><Icon name="upload"/>{uploading ? "上传中…" : "上传资源"}</button></div>
+    </div>
+    <input ref={fileInput} className="asset-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,audio/mpeg,audio/wav,audio/ogg,audio/flac,audio/mp4,video/mp4,video/quicktime,video/webm,video/ogg,.md,.markdown,.txt,.csv,.json,.pdf,.docx,.odt,.epub,.zip,.7z,.rar" onChange={(event: any) => { const file = event.target.files?.[0]; if (file) void uploadFile(file); }}/>
+    <div className="asset-workspace">
+      <main className="asset-library">
+        <div className="asset-library-head"><div><div className="eyebrow brass-text">THE WORKPLACE ARCHIVE</div><h1>创作资源库</h1><p>图片、声音、影像与参考文件独立存在，并可被多个创作对象共同使用。</p></div><div className="asset-view-toggle"><button className={view === "grid" ? "active" : ""} aria-label="网格视图" onClick={() => setView("grid")}><Icon name="grid"/></button><button className={view === "list" ? "active" : ""} aria-label="列表视图" onClick={() => setView("list")}><Icon name="list"/></button></div></div>
+        <div className="asset-filter-bar">
+          <label>类型<select value={typeFilter} onChange={(event: any) => setTypeFilter(event.target.value)}><option value="all">全部类型</option>{(Object.keys(ASSET_TYPE_INFO) as AssetType[]).map(type => <option key={type} value={type}>{ASSET_TYPE_INFO[type].label}</option>)}</select></label>
+          <label>标签<select value={tagFilter} onChange={(event: any) => setTagFilter(event.target.value)}><option value="all">全部标签</option>{allTags.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select></label>
+          <span>{filtered.length} / {assets.length}</span>
+          {uploading && <em className="uploading-state">正在校验并保存文件……</em>}
+        </div>
+        {error && <div className="character-error asset-error">{error}<button onClick={() => setError("")}>关闭</button></div>}
+        {loading ? <div className="character-state"><span className="thinking-mark">✦</span><p>正在整理资源档案……</p></div> : !assets.length ? <div className="character-state character-empty-state asset-empty-state"><div className="empty-book">✦</div><h2>资源库还是空的。</h2><p>上传一张标准形象、一段声音或一份参考文件，建立可复用的创作基础。</p><button className="tool-button primary" onClick={() => fileInput.current?.click()}><Icon name="upload"/>上传第一份资源</button></div> : !filtered.length ? <div className="asset-inline-empty">当前筛选条件下没有资源。</div> : <div className={view === "grid" ? "asset-grid" : "asset-list-view"}>{filtered.map(renderAssetCard)}</div>}
+      </main>
+      <aside className="asset-detail-panel">
+        {detailLoading ? <div className="character-state"><span className="thinking-mark">✦</span><p>正在读取资源详情……</p></div> : !active || !draft ? <div className="asset-detail-empty"><div className="placeholder-ornament">✦</div><div className="eyebrow brass-text">SELECT AN ASSET</div><h2>选择一份资源。</h2><p>查看预览、维护元数据，并管理它被哪些 Character、Scene 或 Document 使用。</p></div> : <>
+          <div className="asset-detail-head"><div><div className="eyebrow">{ASSET_TYPE_INFO[active.asset_type].en} · {active.source.toUpperCase()}</div><h2>{active.name}</h2><p>{active.original_filename || "Studio managed file"}</p></div><button className="head-btn delete-asset" onClick={() => setConfirmDelete(true)}><Icon name="trash"/>删除</button></div>
+          <AssetPreview asset={active} interactive/>
+          {active.file_url && <a className="tool-button asset-open-file" href={active.file_url} target="_blank" rel="noreferrer"><Icon name="file"/>在新窗口打开文件</a>}
+          <div className="asset-edit-form">
+            <label className="field-label">名称<input value={draft.name} maxLength={512} onChange={(event: any) => setDraft(previous => previous ? { ...previous, name: event.target.value } : previous)}/></label>
+            <label className="field-label">描述<textarea rows={3} value={draft.description} onChange={(event: any) => setDraft(previous => previous ? { ...previous, description: event.target.value } : previous)} placeholder="这份资源在创作中承担什么作用？"/></label>
+            <label className="field-label">标签<input value={draft.tags} onChange={(event: any) => setDraft(previous => previous ? { ...previous, tags: event.target.value } : previous)} placeholder="用逗号分隔，例如：mara, portrait, canon"/></label>
+            <label className="field-label">作者<input value={draft.author} maxLength={512} onChange={(event: any) => setDraft(previous => previous ? { ...previous, author: event.target.value } : previous)}/></label>
+            <label className="field-label">制作备注<textarea rows={3} value={draft.notes} onChange={(event: any) => setDraft(previous => previous ? { ...previous, notes: event.target.value } : previous)}/></label>
+            <div className="asset-save-row"><span>{dirty ? "元数据有未保存修改" : "元数据已保存"}</span><button className="tool-button primary" disabled={saving || !dirty} onClick={() => void saveAsset()}>{saving ? "保存中…" : "保存资源信息"}</button></div>
+          </div>
+          <div className="asset-readonly-grid">
+            <div><span>MIME</span><strong>{active.mime_type}</strong></div>
+            <div><span>大小</span><strong>{formatBytes(active.file_size)}</strong></div>
+            <div><span>文件尺寸</span><strong>{active.width && active.height ? `${active.width} × ${active.height}` : "不适用"}</strong></div>
+            <div><span>时长</span><strong>{formatDuration(active.duration_ms) || "不适用"}</strong></div>
+            <div className="wide"><span>SHA-256</span><code title={active.checksum}>{active.checksum || "未记录"}</code></div>
+            <div><span>更新</span><strong>{new Date(active.updated_at).toLocaleString("zh-CN")}</strong></div>
+          </div>
+          <AssetTargetsEditor workplaceId={workplace.id} asset={active} onChange={replaceLinks} notify={notify}/>
+        </>}
+      </aside>
+    </div>
+    {confirmDelete && active && <Modal title="删除这份资源？" eyebrow="ARCHIVE ASSET" onClose={() => setConfirmDelete(false)} actions={<><button className="quiet-button" onClick={() => setConfirmDelete(false)}>保留资源</button><button className="confirm-button danger-button" disabled={deleting} onClick={() => void deleteAsset()}>{deleting ? "删除中…" : "确认删除"}</button></>}>
+      <p className="modal-intro">“{active.name}”会从资源库和所有 Character、Scene、Document 关联中移除，受控文件也会被清理。此操作不会删除任何创作对象本身。</p>
+      {error && <p className="form-error">{error}</p>}
+    </Modal>}
+  </div>;
+}
+
 function App() {
   const [screen, setScreen] = React.useState<"loading" | "shelf" | "opening" | "workplace" | "closing">("loading");
   const [section, setSection] = React.useState<Section>("writing");
@@ -924,7 +1415,7 @@ function App() {
   const [conflict, setConflict] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
-  const [modal, setModal] = React.useState<"create-book" | "create-document" | "contents" | "inspire" | "continue" | "versions" | null>(null);
+  const [modal, setModal] = React.useState<"create-book" | "create-document" | "contents" | "inspire" | "continue" | "versions" | "assets" | null>(null);
   const [bookTitle, setBookTitle] = React.useState("");
   const [bookDescription, setBookDescription] = React.useState("");
   const [bookColor, setBookColor] = React.useState(COVER_PALETTE[0].color);
@@ -1482,7 +1973,7 @@ function App() {
           <div className="page-head"><span>{`DRAFT V${activeDocument?.revision || 1}`}</span><strong className={`save-indicator ${saveState === "版本冲突" ? "danger" : ""}`}>{saveState}</strong></div>
           <div className="writer-heading">
             <div><div className="eyebrow">THE STORY CONTINUES</div><h1>{activeDocument?.title || "未命名手稿"}</h1><div className="writer-meta">字数 {wordCount.toLocaleString("zh-CN")}　·　{mode === "write" ? "写作中" : "阅读中"}</div></div>
-            {mode === "write" && <div className="writer-tools"><button className="tool-button" onMouseDown={(event: any) => event.preventDefault()} onClick={() => void requestInspiration()}><Icon name="lightbulb"/>给我灵感</button><button className="tool-button primary" onMouseDown={(event: any) => event.preventDefault()} onClick={() => void startContinuation()}><Icon name="sparkle"/>AI 续写</button></div>}
+            {mode === "write" && <div className="writer-tools"><button className="tool-button" onMouseDown={(event: any) => event.preventDefault()} onClick={() => setModal("assets")}><Icon name="link"/>文档素材</button><button className="tool-button" onMouseDown={(event: any) => event.preventDefault()} onClick={() => void requestInspiration()}><Icon name="lightbulb"/>给我灵感</button><button className="tool-button primary" onMouseDown={(event: any) => event.preventDefault()} onClick={() => void startContinuation()}><Icon name="sparkle"/>AI 续写</button></div>}
           </div>
           <div className="page-body writer-body" style={{ "--editor-font-size": `${editorFontSize}px` } as any}>
             <div key={`${activeDocument?.id}-${rightIndex}`} ref={(element: HTMLDivElement | null) => { editorRefs.current[rightIndex] = element; }} className="manuscript-page" contentEditable={mode === "write"} suppressContentEditableWarning spellCheck={false} data-placeholder="从这里开始写下你的故事……"
@@ -1539,7 +2030,7 @@ function App() {
     return <section className="workplace-screen" style={{ "--editor-font-size": `${editorFontSize}px` } as any}>
       <header className="workplace-header"><div className="header-brand"><div className="brand-mark small">K</div><span>KHALA STUDIO</span></div><div className="header-title">{workplace?.title || ""}</div><div className="header-right"><span className="server-state"><i/>LOCAL WORKSPACE</span><button className="close-workspace" onClick={() => void closeWorkplace()}>合上书本</button></div></header>
       {renderSectionNav()}
-      {section === "writing" ? renderWritingSection() : section === "characters" ? <CharactersWorkspace workplace={workplace!} notify={notify}/> : section === "scenes" ? <ScenesWorkspace workplace={workplace!} notify={notify}/> : section === "settings" ? renderSettings() : renderPlaceholderSection(section)}
+      {section === "writing" ? renderWritingSection() : section === "characters" ? <CharactersWorkspace workplace={workplace!} notify={notify}/> : section === "scenes" ? <ScenesWorkspace workplace={workplace!} notify={notify}/> : section === "assets" ? <AssetsWorkspace workplace={workplace!} notify={notify}/> : section === "settings" ? renderSettings() : renderPlaceholderSection(section)}
       {toast && <div className="toast-message">{toast}</div>}
     </section>;
   }
@@ -1600,6 +2091,14 @@ function App() {
     </Modal>;
   }
 
+  function renderWritingAssetsModal() {
+    if (!workplace || !activeDocument) return null;
+    return <Modal title="文档关联素材" eyebrow="WRITING REFERENCES" onClose={() => setModal(null)} className="writing-assets-modal" actions={<button className="quiet-button" onClick={() => setModal(null)}>关闭</button>}>
+      <p className="modal-intro">这里管理当前文档引用的插图、参考资料与其他文件。资源仍保存在 Workplace 的统一资源库中。</p>
+      <AssetLinkPanel workplaceId={workplace.id} resourceType="document" resourceId={activeDocument.id} notify={notify}/>
+    </Modal>;
+  }
+
   function renderModal() {
     if (modal === "create-book") return renderCreateBookModal();
     if (modal === "create-document") return renderCreateDocModal();
@@ -1607,6 +2106,7 @@ function App() {
     if (modal === "inspire") return renderInspireModal();
     if (modal === "continue") return renderContinueModal();
     if (modal === "versions") return renderVersionsModal();
+    if (modal === "assets") return renderWritingAssetsModal();
     return null;
   }
 

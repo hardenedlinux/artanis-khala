@@ -26,6 +26,15 @@
             studio-delete-scene!
             studio-list-scene-cast
             studio-replace-scene-cast!
+            studio-list-assets
+            studio-create-asset!
+            studio-get-asset
+            studio-update-asset!
+            studio-archive-asset!
+            studio-list-asset-links
+            studio-add-asset-link!
+            studio-remove-asset-link!
+            studio-list-linked-assets
             studio-list-documents
             studio-create-document!
             studio-get-document
@@ -148,8 +157,54 @@
    "CREATE INDEX IF NOT EXISTS studio_scene_cast_order
       ON studio_scene_cast(scene_id, sort_order, created_at)"))
 
+(define migration-4
+  (list
+   "CREATE TABLE IF NOT EXISTS studio_assets (
+      id TEXT PRIMARY KEY,
+      workplace_id TEXT NOT NULL REFERENCES studio_workplaces(id) ON DELETE CASCADE,
+      name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+      description TEXT NOT NULL DEFAULT '',
+      asset_type TEXT NOT NULL CHECK(asset_type IN ('image', 'audio', 'video', 'document', 'other')),
+      storage_key TEXT NOT NULL DEFAULT '',
+      original_filename TEXT NOT NULL DEFAULT '',
+      mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+      file_size INTEGER NOT NULL DEFAULT 0 CHECK(file_size >= 0),
+      checksum TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'imported' CHECK(source IN ('upload', 'generated', 'imported')),
+      width INTEGER CHECK(width IS NULL OR width > 0),
+      height INTEGER CHECK(height IS NULL OR height > 0),
+      duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms >= 0),
+      author TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      generation_metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT
+    )"
+   "CREATE INDEX IF NOT EXISTS studio_assets_workplace_activity
+      ON studio_assets(workplace_id, archived_at, updated_at DESC)"
+   "CREATE INDEX IF NOT EXISTS studio_assets_checksum
+      ON studio_assets(workplace_id, checksum)"
+   "CREATE UNIQUE INDEX IF NOT EXISTS studio_assets_storage_key
+      ON studio_assets(storage_key) WHERE storage_key <> ''"
+   "CREATE TABLE IF NOT EXISTS studio_asset_tags (
+      asset_id TEXT NOT NULL REFERENCES studio_assets(id) ON DELETE CASCADE,
+      tag TEXT NOT NULL CHECK(length(trim(tag)) > 0),
+      PRIMARY KEY(asset_id, tag)
+    )"
+   "CREATE TABLE IF NOT EXISTS studio_asset_links (
+      asset_id TEXT NOT NULL REFERENCES studio_assets(id) ON DELETE CASCADE,
+      resource_type TEXT NOT NULL CHECK(resource_type IN ('character', 'scene', 'document')),
+      resource_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(asset_id, resource_type, resource_id)
+    )"
+   "CREATE INDEX IF NOT EXISTS studio_asset_links_resource
+      ON studio_asset_links(resource_type, resource_id, asset_id)"))
+
 (define (migrations)
-  (list (cons 1 migration-1) (cons 2 migration-2) (cons 3 migration-3)))
+  (list (cons 1 migration-1) (cons 2 migration-2)
+        (cons 3 migration-3) (cons 4 migration-4)))
 
 (define (studio-now)
   (strftime "%Y-%m-%dT%H:%M:%SZ" (gmtime (current-time))))
@@ -472,7 +527,12 @@
                        SET archived_at = ?, updated_at = ?
                      WHERE id = ? AND workplace_id = ? AND archived_at IS NULL"
                    now now character-id workplace-id)
-            (and (> (dbi-affected-rows db) 0) now)))))))
+            (and (> (dbi-affected-rows db) 0)
+                 (begin
+                   (query db "DELETE FROM studio_asset_links
+                               WHERE resource_type = 'character' AND resource_id = ?"
+                          character-id)
+                   now))))))))
 
 (define scene-columns
   "id, workplace_id, title, summary, sort_order, status,
@@ -606,7 +666,12 @@
                    "UPDATE studio_scenes SET deleted_at = ?, updated_at = ?
                      WHERE id = ? AND workplace_id = ? AND deleted_at IS NULL"
                    now now scene-id workplace-id)
-            (and (> (dbi-affected-rows db) 0) now)))))))
+            (and (> (dbi-affected-rows db) 0)
+                 (begin
+                   (query db "DELETE FROM studio_asset_links
+                               WHERE resource_type = 'scene' AND resource_id = ?"
+                          scene-id)
+                   now))))))))
 
 (define scene-cast-columns
   "c.id, c.scene_id, c.character_id, c.objective, c.action, c.conflict,
@@ -681,6 +746,219 @@
                       (or (assoc-ref entry 'sort_order) 0) now now))
              entries))
           (scene-cast-by-scene db scene-id))))))
+
+(define asset-columns
+  "id, workplace_id, name, description, asset_type, storage_key,
+   original_filename, mime_type, file_size, checksum, source,
+   width, height, duration_ms, author, notes, generation_metadata,
+   created_at, updated_at, archived_at")
+
+(define asset-columns-qualified
+  "a.id, a.workplace_id, a.name, a.description, a.asset_type, a.storage_key,
+   a.original_filename, a.mime_type, a.file_size, a.checksum, a.source,
+   a.width, a.height, a.duration_ms, a.author, a.notes,
+   a.generation_metadata, a.created_at, a.updated_at, a.archived_at")
+
+(define (asset-from-row row)
+  `((id . ,(row-value row "id"))
+    (workplace_id . ,(row-value row "workplace_id"))
+    (name . ,(row-value row "name"))
+    (description . ,(or (row-value row "description") ""))
+    (asset_type . ,(row-value row "asset_type"))
+    (storage_key . ,(or (row-value row "storage_key") ""))
+    (original_filename . ,(or (row-value row "original_filename") ""))
+    (mime_type . ,(or (row-value row "mime_type") "application/octet-stream"))
+    (file_size . ,(db-int (row-value row "file_size")))
+    (checksum . ,(or (row-value row "checksum") ""))
+    (source . ,(row-value row "source"))
+    (width . ,(and (row-value row "width") (db-int (row-value row "width"))))
+    (height . ,(and (row-value row "height") (db-int (row-value row "height"))))
+    (duration_ms . ,(and (row-value row "duration_ms")
+                         (db-int (row-value row "duration_ms"))))
+    (author . ,(or (row-value row "author") ""))
+    (notes . ,(or (row-value row "notes") ""))
+    (generation_metadata . ,(or (row-value row "generation_metadata") "{}"))
+    (created_at . ,(row-value row "created_at"))
+    (updated_at . ,(row-value row "updated_at"))
+    (archived_at . ,(row-value row "archived_at"))
+    (tags . ())))
+
+(define (asset-tags db asset-id)
+  (query db "SELECT tag FROM studio_asset_tags WHERE asset_id = ? ORDER BY tag COLLATE NOCASE"
+         asset-id)
+  (map (lambda (row) (row-value row "tag")) (all-rows db)))
+
+(define (asset-with-tags db row)
+  (let ((asset (asset-from-row row)))
+    (acons 'tags (asset-tags db (assoc-ref asset 'id)) asset)))
+
+(define (asset-by-id db workplace-id asset-id)
+  (query db
+         (string-append "SELECT " asset-columns " FROM studio_assets
+                         WHERE id = ? AND workplace_id = ? AND archived_at IS NULL")
+         asset-id workplace-id)
+  (let ((row (dbi-get_row db))) (and row (asset-with-tags db row))))
+
+(define (studio-list-assets config workplace-id)
+  (with-db config
+    (lambda (db)
+      (query db
+             (string-append "SELECT " asset-columns " FROM studio_assets
+                             WHERE workplace_id = ? AND archived_at IS NULL
+                             ORDER BY updated_at DESC, created_at DESC, name ASC")
+             workplace-id)
+      (map (lambda (row) (asset-with-tags db row)) (all-rows db)))))
+
+(define (replace-asset-tags! db asset-id tags)
+  (query db "DELETE FROM studio_asset_tags WHERE asset_id = ?" asset-id)
+  (for-each
+   (lambda (tag)
+     (query db "INSERT OR IGNORE INTO studio_asset_tags(asset_id, tag) VALUES(?, ?)"
+            asset-id tag))
+   tags))
+
+(define (studio-create-asset! config id workplace-id values)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now))
+                (field (lambda (key default)
+                         (let ((value (assoc-ref values key)))
+                           (if value value default)))))
+            (query db
+                   "INSERT INTO studio_assets
+                      (id, workplace_id, name, description, asset_type,
+                       storage_key, original_filename, mime_type, file_size,
+                       checksum, source, width, height, duration_ms, author,
+                       notes, generation_metadata, created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   id workplace-id (assoc-ref values 'name)
+                   (field 'description "") (assoc-ref values 'asset_type)
+                   (field 'storage_key "") (field 'original_filename "")
+                   (field 'mime_type "application/octet-stream")
+                   (or (assoc-ref values 'file_size) 0)
+                   (field 'checksum "") (field 'source "imported")
+                   (sql-value (assoc-ref values 'width))
+                   (sql-value (assoc-ref values 'height))
+                   (sql-value (assoc-ref values 'duration_ms))
+                   (field 'author "") (field 'notes "")
+                   (field 'generation_metadata "{}") now now)
+            (replace-asset-tags! db id (or (assoc-ref values 'tags) '()))
+            (asset-by-id db workplace-id id)))))))
+
+(define (studio-get-asset config workplace-id asset-id)
+  (with-db config (lambda (db) (asset-by-id db workplace-id asset-id))))
+
+(define* (studio-update-asset! config workplace-id asset-id updates
+                               #:key (tags #f))
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let* ((now (studio-now))
+                 (clause (update-clause
+                          updates
+                          '(name description asset_type source width height
+                            duration_ms author notes generation_metadata
+                            original_filename mime_type file_size checksum
+                            storage_key)))
+                 (sets (car clause))
+                 (values (cdr clause)))
+            (unless (and (null? sets) (not tags))
+              (when (pair? sets)
+                (dbi-params-query db
+                  (string-append
+                   "UPDATE studio_assets SET "
+                   (string-join sets ", ")
+                   ", updated_at = ? WHERE id = ? AND workplace_id = ?
+                     AND archived_at IS NULL")
+                  (append values (list now asset-id workplace-id))))
+              (when tags
+                (query db "UPDATE studio_assets SET updated_at = ?
+                            WHERE id = ? AND workplace_id = ? AND archived_at IS NULL"
+                       now asset-id workplace-id)
+                (replace-asset-tags! db asset-id tags)))
+            (asset-by-id db workplace-id asset-id)))))))
+
+(define (studio-archive-asset! config workplace-id asset-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((asset (asset-by-id db workplace-id asset-id)))
+            (and asset
+                 (let ((now (studio-now)))
+                   (query db "UPDATE studio_assets SET archived_at = ?, updated_at = ?
+                               WHERE id = ? AND workplace_id = ? AND archived_at IS NULL"
+                          now now asset-id workplace-id)
+                   (when (> (dbi-affected-rows db) 0)
+                     (query db "DELETE FROM studio_asset_links WHERE asset_id = ?"
+                            asset-id)
+                     `((id . ,asset-id)
+                       (workplace_id . ,workplace-id)
+                       (storage_key . ,(assoc-ref asset 'storage_key))
+                       (archived_at . ,now)))))))))))
+
+(define (link-from-row row)
+  `((asset_id . ,(row-value row "asset_id"))
+    (resource_type . ,(row-value row "resource_type"))
+    (resource_id . ,(row-value row "resource_id"))
+    (created_at . ,(row-value row "created_at"))))
+
+(define (studio-list-asset-links config workplace-id asset-id)
+  (with-db config
+    (lambda (db)
+      (and (asset-by-id db workplace-id asset-id)
+           (begin
+             (query db "SELECT asset_id, resource_type, resource_id, created_at
+                          FROM studio_asset_links WHERE asset_id = ?
+                          ORDER BY resource_type ASC, resource_id ASC"
+                    asset-id)
+             (map link-from-row (all-rows db)))))))
+
+(define (studio-add-asset-link! config workplace-id asset-id resource-type resource-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (unless (asset-by-id db workplace-id asset-id)
+            (throw 'studio-asset-link-error 'asset-not-found))
+          (let ((now (studio-now)))
+            (query db "INSERT OR IGNORE INTO studio_asset_links
+                         (asset_id, resource_type, resource_id, created_at)
+                       VALUES(?, ?, ?, ?)"
+                   asset-id resource-type resource-id now)
+            `((asset_id . ,asset-id)
+              (resource_type . ,resource-type)
+              (resource_id . ,resource-id)
+              (created_at . ,now))))))))
+
+(define (studio-remove-asset-link! config workplace-id asset-id resource-type resource-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (unless (asset-by-id db workplace-id asset-id)
+            (throw 'studio-asset-link-error 'asset-not-found))
+          (query db "DELETE FROM studio_asset_links
+                      WHERE asset_id = ? AND resource_type = ? AND resource_id = ?"
+                 asset-id resource-type resource-id)
+          (> (dbi-affected-rows db) 0))))))
+
+(define (studio-list-linked-assets config workplace-id resource-type resource-id)
+  (with-db config
+    (lambda (db)
+      (query db
+             (string-append
+              "SELECT " asset-columns-qualified "
+                 FROM studio_assets a
+                 JOIN studio_asset_links l ON l.asset_id = a.id
+                WHERE a.workplace_id = ? AND a.archived_at IS NULL
+                  AND l.resource_type = ? AND l.resource_id = ?
+                ORDER BY a.updated_at DESC, a.created_at DESC, a.name ASC")
+             workplace-id resource-type resource-id)
+      (map (lambda (row) (asset-with-tags db row)) (all-rows db)))))
 
 (define document-columns
   "id, workplace_id, parent_id, kind, title, content, content_format,

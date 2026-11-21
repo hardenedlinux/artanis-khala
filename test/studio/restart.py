@@ -56,3 +56,27 @@ assert cast[0]["character_id"] == expected["character_id"], cast
 assert cast[0]["objective"] == "Make Ilyan admit he lied.", cast
 assert cast[0]["character_name"] == "Mara Vale", cast
 print("ok studio-scene-cast-survives-restart")
+
+asset_url = (
+    f"http://127.0.0.1:{port}/studio/api/v1/workplaces/"
+    f"{expected['workplace_id']}/assets/{expected['asset_id']}"
+)
+with opener.open(asset_url, timeout=10) as response:
+    asset = json.loads(response.read())["data"]
+
+assert asset["name"] == "Mara portrait — canon", asset
+assert asset["tags"] == ["canon", "portrait"], asset
+assert asset["checksum"] == expected["asset_checksum"], asset
+assert len(asset["links"]) == 3, asset
+assert {link["resource_type"] for link in asset["links"]} == {
+    "character", "scene", "document"
+}, asset
+print("ok studio-asset-survives-restart")
+
+with opener.open("http://127.0.0.1:" + port + asset["file_url"], timeout=10) as response:
+    file_bytes = response.read()
+    content_type = response.headers.get("Content-Type", "")
+
+assert content_type.startswith("image/png"), content_type
+assert file_bytes.startswith(b"\x89PNG\r\n\x1a\n"), file_bytes[:16]
+print("ok studio-asset-file-survives-restart")

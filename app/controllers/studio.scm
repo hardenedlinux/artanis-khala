@@ -4,6 +4,7 @@
 
 (use-modules (artanis artanis)
              (artanis route)
+             (artanis upload)
              (ice-9 format)
              (ice-9 optargs)
              (rnrs bytevectors)
@@ -119,6 +120,71 @@
        #:headers `((content-type . ,content-type)
                    (cache-control . (no-cache))))
       (response-emit "Not found" #:status 404)))
+
+(define (multipart-part operator name)
+  (find (lambda (part) (equal? (mfd-name part) name))
+        (mfds-operator-mfds operator)))
+
+(define (multipart-field rc operator name)
+  (let ((part (multipart-part operator name)))
+    (and part (mfds-op-ref rc operator name))))
+
+(define (upload-handler rc)
+  (let* ((workplace-id (params rc "workplace_id"))
+         (operator (get-mfds-op-from-post rc))
+         (file-part (find (lambda (part)
+                            (and (equal? (mfd-name part) "file")
+                                 (mfd-filename part)))
+                          (mfds-operator-mfds operator)))
+         (raw-filename (and file-part (mfd-filename file-part)))
+         (filename (and raw-filename (basename raw-filename)))
+         (bytes (and file-part
+                     (mfds-op-ref rc operator "file" #:bv? #t)))
+         (mime (and file-part (mfd-type file-part)))
+         (field-names '("name" "description" "asset_type" "source" "width"
+                        "height" "duration_ms" "author" "notes" "tags"
+                        "generation_metadata"))
+         (fields (filter-map
+                  (lambda (name)
+                    (let ((value (multipart-field rc operator name)))
+                      (and value (cons name value))))
+                  field-names)))
+    (unless (and file-part filename bytes (> (bytevector-length bytes) 0))
+      (throw 'studio-api-error 400 "INVALID_UPLOAD"
+             "A non-empty multipart file field named 'file' is required" '()))
+    (reply-success
+     (studio-create-uploaded-asset! config workplace-id (studio-new-id)
+                                    filename mime bytes fields)
+     201)))
+
+(define (header-safe-filename value)
+  (let ((chars (string->list (or value ""))))
+    (if (null? chars)
+        "asset"
+        (list->string
+         (map (lambda (char)
+                (if (or (char=? char #\") (char=? char #\\) (char<? char #\space))
+                    #\_
+                    char))
+              chars)))))
+
+(define (asset-file-handler rc)
+  (let* ((info (studio-asset-file-info config (params rc "workplace_id")
+                                       (params rc "asset_id")))
+         (asset (assoc-ref info 'asset))
+         (path (assoc-ref info 'path))
+         (mime (assoc-ref asset 'mime_type))
+         (filename (header-safe-filename
+                    (or (assoc-ref asset 'original_filename)
+                        (assoc-ref asset 'storage_key)
+                        "asset"))))
+    (response-emit
+     (call-with-input-file path get-bytevector-all)
+     #:headers
+     `((content-type . ,(list (string->symbol mime)))
+       (content-disposition . (inline (filename . ,filename)))
+       (x-content-type-options . "nosniff")
+       (cache-control . (private (max-age . 300)))))))
 
 (define (inspire-handler rc)
   (let* ((workplace-id (params rc "workplace_id"))
@@ -323,6 +389,107 @@
            (studio-update-scene-cast! config (params rc "workplace_id")
                                       (params rc "scene_id")
                                       (body-json rc)))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/assets"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-assets config (params rc "workplace_id")))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/assets"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-create-asset! config (params rc "workplace_id")
+                                  (body-json rc))
+            201)))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/assets/upload"
+      (lambda (rc) (api-handler (lambda () (upload-handler rc)))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/assets/:asset_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-get-asset config (params rc "workplace_id")
+                             (params rc "asset_id")))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/assets/:asset_id/file"
+     (lambda (rc) (api-handler (lambda () (asset-file-handler rc)))))
+
+(put "/studio/api/v1/workplaces/:workplace_id/assets/:asset_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-update-asset! config (params rc "workplace_id")
+                                 (params rc "asset_id")
+                                 (body-json rc)))))))
+
+(page-delete "/studio/api/v1/workplaces/:workplace_id/assets/:asset_id"
+             (lambda (rc)
+               (api-handler
+                (lambda ()
+                  (reply-success
+                   (studio-delete-asset! config (params rc "workplace_id")
+                                         (params rc "asset_id")))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/assets/:asset_id/links"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-asset-links config (params rc "workplace_id")
+                                    (params rc "asset_id")))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/assets/:asset_id/links"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-add-asset-link! config (params rc "workplace_id")
+                                    (params rc "asset_id")
+                                    (body-json rc))
+            201)))))
+
+(page-delete "/studio/api/v1/workplaces/:workplace_id/assets/:asset_id/links/:resource_type/:resource_id"
+             (lambda (rc)
+               (api-handler
+                (lambda ()
+                  (reply-success
+                   (studio-remove-asset-link!
+                    config (params rc "workplace_id") (params rc "asset_id")
+                    (params rc "resource_type") (params rc "resource_id")))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/assets"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-resource-assets config (params rc "workplace_id")
+                                        "character"
+                                        (params rc "character_id")))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id/assets"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-resource-assets config (params rc "workplace_id")
+                                        "scene"
+                                        (params rc "scene_id")))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/documents/:document_id/assets"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-resource-assets config (params rc "workplace_id")
+                                        "document"
+                                        (params rc "document_id")))))))
 
 (get "/studio/api/v1/workplaces/:workplace_id/documents"
      (lambda (rc)

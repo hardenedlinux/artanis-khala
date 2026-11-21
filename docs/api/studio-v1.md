@@ -16,10 +16,16 @@ ComfyUI history or queue persistence.
 
 ```text
 studio_db = var/studio.sqlite3
+studio_assets_dir = var/studio-assets
+studio_asset_max_bytes = 4194304
 studio_model =
 ```
 
 - `studio_db` is the Studio SQLite path. Missing parent directories are created.
+- `studio_assets_dir` is the server-managed root for Asset file bytes. It is
+  independent from ComfyUI input, output, history, and queue storage.
+- `studio_asset_max_bytes` limits each uploaded Asset to 4 MiB, leaving room
+  for multipart framing inside the Artanis 5 MiB request limit.
 - `studio_model` optionally selects the default writing model. If it is empty,
   the first installed LLM is used; the fake engine falls back to the built-in
   `fake` model.
@@ -27,7 +33,7 @@ studio_model =
   `fake` and `sonicboom`; Studio does not introduce another inference backend.
 
 The database is initialized on first use and runs migrations through version
-`3`. The schema includes:
+`4`. The schema includes:
 
 - `studio_schema_migrations`
 - `studio_workplaces`
@@ -36,10 +42,19 @@ The database is initialized on first use and runs migrations through version
 - `studio_characters`
 - `studio_scenes`
 - `studio_scene_cast`
+- `studio_assets`
+- `studio_asset_tags`
+- `studio_asset_links`
 
 `studio_characters` stores a stable UUID, `workplace_id`, `name`, `role`,
 `summary`, four independent JSON identity objects, timestamps, and a nullable
 `archived_at` soft-delete marker.
+
+`studio_assets` stores Asset metadata and a server-generated `storage_key`, but
+never stores a client-supplied filesystem path. File bytes live beneath
+`studio_assets_dir`. `studio_asset_tags` stores normalized tags and
+`studio_asset_links` stores generic references to `character`, `scene`, or
+`document` resources by stable UUID.
 
 All mutations use SQLite transactions and parameterized SQL. Foreign keys and a
 five-second busy timeout are enabled for every connection.
@@ -312,6 +327,149 @@ Workplace. A cross-Workplace or unknown Character returns HTTP `422` with
 The update deletes and recreates cast rows inside `BEGIN IMMEDIATE`; if any
 validation or insert fails, the previous cast remains intact.
 
+## Assets
+
+Assets form the Workplace's shared creative library. File bytes and metadata
+are stored separately: SQLite holds the Asset record, tags, checksum, and a
+server-generated `storage_key`; the file lives under the configured
+`studio_assets_dir`. An Asset may be linked to any number of Characters,
+Scenes, and Documents, and each of those resources may use many Assets.
+
+Supported `asset_type` values are `image`, `audio`, `video`, `document`, and
+`other`. Supported `source` values for metadata-only creation are `generated`
+and `imported`; multipart uploads always record `source` as `upload`.
+
+List non-archived Assets ordered by recent activity:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets
+```
+
+Create a metadata-only Asset entry:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"Research notes index",
+    "description":"References gathered for the harbor sequence.",
+    "asset_type":"document",
+    "source":"imported",
+    "author":"Studio author",
+    "notes":"Metadata-only entry.",
+    "tags":["research","harbor"],
+    "generation_metadata":{"workflow":"manual-reference"}
+  }'
+```
+
+Clients cannot set `storage_key`, `checksum`, or `file_size`; those fields are
+server-managed and return HTTP `400` if supplied. `generation_metadata` is a
+forward-compatible JSON object for generated-source metadata such as model,
+task ID, or parameters.
+
+Upload a file with `multipart/form-data` using the field name `file`:
+
+```sh
+curl --noproxy '*' -X POST \
+  http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets/upload \
+  -F 'file=@portrait.png;type=image/png' \
+  -F 'name=Mara Portrait' \
+  -F 'description=Approved visual reference' \
+  -F 'asset_type=image' \
+  -F 'author=Studio author' \
+  -F 'tags=["mara","portrait"]' \
+  -F 'generation_metadata={"workflow":"manual-reference"}'
+```
+
+The server derives the final storage filename, validates the extension, MIME
+type, magic bytes or UTF-8 text, file size, and requested `asset_type`, then
+writes through a temporary file before renaming it into place. A checksum is
+recorded as lowercase SHA-256. The database row is created only after the file
+is safely stored; if the insert fails, the new file is removed.
+
+Upload failures use HTTP `400`, or `413` for an Asset over
+`studio_asset_max_bytes`, with codes such
+as `INVALID_UPLOAD`, `INVALID_FILENAME`, `MIME_MISMATCH`, `INVALID_CONTENT`,
+`UNSUPPORTED_MEDIA_TYPE`, `TYPE_MISMATCH`, and `FILE_TOO_LARGE`. HTML, SVG,
+script, executable, and other dangerous types are rejected.
+
+Read Asset metadata. Detail responses include current links:
+
+```sh
+ASSET_ID=00000000-0000-4000-8000-000000000005
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets/$ASSET_ID
+```
+
+Update editable metadata. Omitted fields stay unchanged:
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets/$ASSET_ID \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Mara Portrait — Canon","description":"Approved visual Canon.","tags":["canon","portrait"],"width":1024,"height":1024}'
+```
+
+Use the returned `file_url` to preview the managed file. The endpoint checks the
+Asset, Workplace, and canonical storage path; it never accepts a filesystem
+path from the client:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets/$ASSET_ID/file
+```
+
+Responses include the stored MIME type, inline `Content-Disposition`,
+`X-Content-Type-Options: nosniff`, and private caching. A missing file returns
+HTTP `404` with `ASSET_FILE_MISSING`.
+
+Archive an Asset with a soft delete. Its links are removed and its managed file
+is deleted, while the metadata row retains the stable Asset ID and
+`archived_at`:
+
+```sh
+curl --noproxy '*' -X DELETE http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets/$ASSET_ID
+```
+
+### Asset Links
+
+List an Asset's current links:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets/$ASSET_ID/links
+```
+
+Link an Asset to a Character, Scene, or Document:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets/$ASSET_ID/links \
+  -H 'Content-Type: application/json' \
+  -d '{"resource_type":"character","resource_id":"00000000-0000-4000-8000-000000000003"}'
+```
+
+`resource_type` is `character`, `scene`, or `document`. The target must exist in
+the same non-archived Workplace; otherwise the request returns HTTP `422` with
+`INVALID_RESOURCE`. Links store only the resource type and stable UUID, never a
+copy of Character or Scene data.
+
+Remove one link:
+
+```sh
+curl --noproxy '*' -X DELETE \
+  http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/assets/$ASSET_ID/links/character/$CHARACTER_ID
+```
+
+Read the Assets attached to a resource:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/assets
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/assets
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/documents/$DOCUMENT_ID/assets
+```
+
+Archiving a Character, deleting a Scene, or archiving an Asset also removes the
+corresponding link rows in the same transaction. Scene deletion never deletes
+Characters or Assets. If an Asset's managed file is missing or unreadable, its
+file route returns HTTP `404` with `ASSET_FILE_MISSING` while the metadata row
+remains available for repair or deletion.
+
 ## Documents
 
 List the document tree as a flat, ordered list with `parent_id` relationships.
@@ -453,12 +611,12 @@ The continuation prompt lives in `conf/studio-prompts/continue.md`.
 | Status | Meaning |
 |---:|---|
 | `200` | Success. |
-| `201` | Workplace, character, document, or version created. |
+| `201` | Workplace, Character, Scene, Asset, link, document, or version created. |
 | `400` | Invalid JSON, UUID, enum, string, or numeric input. |
-| `404` | Workplace, character, document, or version not found. |
+| `404` | Workplace, Character, Scene, Asset, document, version, or managed file not found. |
 | `409` | `REVISION_CONFLICT`; the response includes `current_revision`. |
-| `413` | Request body exceeds 4 MiB. |
-| `422` | Invalid resource state, such as a parent from another Workplace. |
+| `413` | Request body exceeds 4 MiB or an uploaded Asset exceeds `studio_asset_max_bytes`. |
+| `422` | Invalid resource state, such as a parent or Asset link target from another Workplace. |
 | `502` | Generation failed. |
 | `503` | Inference engine or model unavailable. |
 
@@ -474,12 +632,20 @@ Open the prototype at:
 http://127.0.0.1:3000/studio
 ```
 
-The React bundle in `studio-ui/` loads Workplaces, documents and Characters from
-this API. The Characters workspace creates and edits the four identity sections
-independently, persists them to SQLite, and archives characters with a soft
-delete. Writing continues to autosave with `expected_revision`, request
-inspiration, consume continuation SSE, and insert accepted text only after the
-author approves it.
+The React bundle in `studio-ui/` loads Workplaces, documents, Characters,
+Scenes, and Assets from this API. The Characters workspace creates and edits
+the four identity sections independently, persists them to SQLite, and
+archives characters with a soft delete. Writing continues to autosave with
+`expected_revision`, request inspiration, consume continuation SSE, and insert
+accepted text only after the author approves it.
+
+The Assets workspace provides grid and list views, image thumbnails, native
+audio/video previews, document placeholders, upload state, type/tag filters,
+metadata editing, and soft deletion. Asset detail shows every linked Character,
+Scene, and Document. Characters and Scenes include a compact linked-assets
+panel, while Writing exposes the same panel for the active Document. These
+panels use the shared Asset-library picker and do not duplicate Character or
+Scene data.
 
 ## Tests
 
@@ -490,5 +656,7 @@ GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/persisten
 ./test/studio/run.sh
 ```
 
-The runner creates temporary SQLite files, starts and stops Artanis twice, and
-checks persistence across a restart. It never enables SonicBoom.
+The runner creates temporary SQLite and Asset directories, starts and stops
+Artanis twice, and checks document, Character, Scene, Cast, Asset metadata,
+tags, managed file bytes, missing-file errors, upload limits, temporary-file
+cleanup, and Asset links across a restart. It never enables SonicBoom.

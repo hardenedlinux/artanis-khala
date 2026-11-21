@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import time
+import base64
 import urllib.error
 import urllib.request
 import uuid
@@ -17,18 +18,48 @@ import uuid
 PORT = os.environ.get("KHALA_STUDIO_TEST_PORT", "3188")
 BASE = f"http://127.0.0.1:{PORT}"
 STATE_PATH = os.environ.get("KHALA_STUDIO_STATE")
+ASSETS_DIR = os.environ["KHALA_STUDIO_TEST_ASSETS_DIR"]
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def request(method, path, data=None):
-    body = None if data is None else json.dumps(data).encode()
-    headers = {"Content-Type": "application/json"} if body else {}
-    req = urllib.request.Request(BASE + path, data=body, method=method, headers=headers)
+def request_raw(method, path, body=None, headers=None):
+    req = urllib.request.Request(BASE + path, data=body, method=method, headers=headers or {})
     try:
         with OPENER.open(req, timeout=30) as response:
             return response.status, response.read(), dict(response.headers)
     except urllib.error.HTTPError as error:
         return error.code, error.read(), dict(error.headers)
+
+
+def request(method, path, data=None):
+    body = None if data is None else json.dumps(data).encode()
+    headers = {"Content-Type": "application/json"} if body else {}
+    return request_raw(method, path, body, headers)
+
+
+def multipart_upload(path, fields, filename, content, mime="image/png"):
+    boundary = f"----khala{uuid.uuid4().hex}"
+    chunks = []
+    for name, value in fields.items():
+        chunks.extend([
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+            str(value).encode(),
+            b"\r\n",
+        ])
+    chunks.extend([
+        f"--{boundary}\r\n".encode(),
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode(),
+        f"Content-Type: {mime}\r\n\r\n".encode(),
+        content,
+        b"\r\n",
+        f"--{boundary}--\r\n".encode(),
+    ])
+    body = b"".join(chunks)
+    return request_raw(
+        "POST", path, body,
+        {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
 
 
 def json_request(method, path, data=None, expected=200):
@@ -548,6 +579,272 @@ historical_after = json_request(
 )
 check("restore-preserves-history", historical_after["content"] == "hello brave world")
 
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+assets_path = f"/studio/api/v1/workplaces/{workplace_id}/assets"
+status, body, _ = multipart_upload(
+    f"{assets_path}/upload",
+    {
+        "name": "Mara portrait",
+        "description": "Approved visual reference for the coast sequence.",
+        "asset_type": "image",
+        "width": "1",
+        "height": "1",
+        "author": "Studio author",
+        "notes": "Keep the coat silhouette consistent.",
+        "tags": '["portrait", "mara"]',
+        "generation_metadata": '{"workflow":"manual-reference"}',
+    },
+    "mara-portrait.png",
+    PNG_BYTES,
+)
+assert status == 201, (status, body)
+asset = json.loads(body)["data"]
+asset_id = asset["id"]
+check(
+    "asset-uploaded",
+    asset["asset_type"] == "image"
+    and asset["source"] == "upload"
+    and asset["mime_type"] == "image/png"
+    and asset["file_size"] == len(PNG_BYTES)
+    and len(asset["checksum"]) == 64
+    and asset["tags"] == ["mara", "portrait"]
+    and asset["generation_metadata"]["workflow"] == "manual-reference",
+)
+check(
+    "asset-file-url-managed",
+    asset["file_url"].startswith(f"/studio/api/v1/workplaces/{workplace_id}/assets/")
+    and asset["storage_key"].endswith(".png")
+    and "/" not in asset["storage_key"],
+)
+asset_file_path = asset["file_url"]
+status, file_body, file_headers = request_raw("GET", asset_file_path)
+check(
+    "asset-file-served",
+    status == 200
+    and file_body == PNG_BYTES
+    and file_headers.get("Content-Type", "").startswith("image/png")
+    and file_headers.get("X-Content-Type-Options") == "nosniff"
+    and "inline" in file_headers.get("Content-Disposition", ""),
+)
+asset_list = json_request("GET", assets_path)
+check("asset-listed", any(item["id"] == asset_id for item in asset_list))
+asset_detail = json_request("GET", f"{assets_path}/{asset_id}")
+check("asset-detail", asset_detail["name"] == "Mara portrait")
+
+updated_asset = json_request(
+    "PUT",
+    f"{assets_path}/{asset_id}",
+    {
+        "name": "Mara portrait — canon",
+        "description": "Approved visual canon.",
+        "author": "Mara's author",
+        "notes": "Use for scenes in the northern harbor.",
+        "tags": ["canon", "portrait"],
+        "width": 1,
+        "height": 1,
+    },
+)
+check(
+    "asset-updated",
+    updated_asset["name"] == "Mara portrait — canon"
+    and updated_asset["author"] == "Mara's author"
+    and updated_asset["tags"] == ["canon", "portrait"],
+)
+
+for resource_type, resource_id in (
+    ("character", character_id),
+    ("scene", scene_id),
+    ("document", document_id),
+):
+    link = json_request(
+        "POST",
+        f"{assets_path}/{asset_id}/links",
+        {"resource_type": resource_type, "resource_id": resource_id},
+        201,
+    )
+    check(f"asset-linked-{resource_type}", link["resource_id"] == resource_id)
+linked_detail = json_request("GET", f"{assets_path}/{asset_id}")
+check("asset-has-multiple-links", len(linked_detail["links"]) == 3)
+for resource_type, resource_path, resource_id in (
+    ("character", "characters", character_id),
+    ("scene", "scenes", scene_id),
+    ("document", "documents", document_id),
+):
+    linked_assets = json_request(
+        "GET",
+        f"/studio/api/v1/workplaces/{workplace_id}/{resource_path}/{resource_id}/assets",
+    )
+    check(
+        f"asset-visible-from-{resource_type}",
+        any(item["id"] == asset_id for item in linked_assets),
+    )
+
+status, body, _ = request(
+    "POST",
+    f"{assets_path}/{asset_id}/links",
+    {"resource_type": "character", "resource_id": other_character["id"]},
+)
+check(
+    "asset-link-rejects-other-workplace",
+    status == 422 and json.loads(body)["error"]["code"] == "INVALID_RESOURCE",
+)
+check(
+    "asset-workplace-isolated-list",
+    json_request("GET", f"/studio/api/v1/workplaces/{other_workplace_id}/assets") == [],
+)
+for method in ("GET", "DELETE"):
+    status, _, _ = request(
+        method,
+        f"/studio/api/v1/workplaces/{other_workplace_id}/assets/{asset_id}",
+    )
+    assert status == 404, (method, status)
+status, _, _ = request(
+    "GET",
+    f"/studio/api/v1/workplaces/{other_workplace_id}/assets/{asset_id}/file",
+)
+check("asset-workplace-isolated-detail", status == 404)
+
+removed_link = json_request(
+    "DELETE",
+    f"{assets_path}/{asset_id}/links/scene/{scene_id}",
+)
+check("asset-link-removed", removed_link["removed"])
+json_request(
+    "POST",
+    f"{assets_path}/{asset_id}/links",
+    {"resource_type": "scene", "resource_id": scene_id},
+    201,
+)
+
+status, body, _ = multipart_upload(
+    f"{assets_path}/upload",
+    {"name": "Temporary reference", "tags": "temporary"},
+    "temporary.png",
+    PNG_BYTES,
+)
+assert status == 201, (status, body)
+temporary_asset = json.loads(body)["data"]
+temporary_asset_id = temporary_asset["id"]
+json_request(
+    "POST",
+    f"{assets_path}/{temporary_asset_id}/links",
+    {"resource_type": "character", "resource_id": character_id},
+    201,
+)
+deleted_asset = json_request("DELETE", f"{assets_path}/{temporary_asset_id}")
+check("asset-soft-deleted", bool(deleted_asset["archived_at"]))
+status, _, _ = request_raw("GET", temporary_asset["file_url"])
+check("asset-file-removed-on-delete", status == 404)
+character_assets_after_delete = json_request(
+    "GET",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters/{character_id}/assets",
+)
+check(
+    "asset-delete-clears-links",
+    all(item["id"] != temporary_asset_id for item in character_assets_after_delete),
+)
+status, _, _ = request("GET", f"{assets_path}/{temporary_asset_id}")
+check("deleted-asset-404", status == 404)
+
+metadata_asset = json_request(
+    "POST",
+    assets_path,
+    {
+        "name": "Research notes index",
+        "description": "A metadata-only reference entry.",
+        "asset_type": "document",
+        "source": "imported",
+        "tags": ["research"],
+    },
+    201,
+)
+check(
+    "asset-metadata-only",
+    metadata_asset["has_file"] is False and metadata_asset["file_url"] is None,
+)
+status, body, _ = request(
+    "POST",
+    assets_path,
+    {"name": "Forbidden fields", "storage_key": "../../etc/passwd"},
+)
+check(
+    "asset-rejects-client-paths",
+    status == 400 and json.loads(body)["error"]["code"] == "VALIDATION_ERROR",
+)
+
+for filename, content, mime, expected_code in (
+    ("empty.png", b"", "image/png", "INVALID_UPLOAD"),
+    ("wrong.txt", b"plain text", "image/png", "MIME_MISMATCH"),
+    ("fake.png", b"not actually a png", "image/png", "INVALID_CONTENT"),
+    ("unsafe.html", b"<script>alert(1)</script>", "text/html", "UNSUPPORTED_MEDIA_TYPE"),
+):
+    status, body, _ = multipart_upload(
+        f"{assets_path}/upload", {"name": "Rejected upload"}, filename, content, mime
+    )
+    check(
+        f"upload-rejects-{filename}",
+        status == 400 and json.loads(body)["error"]["code"] == expected_code,
+    )
+status, body, _ = multipart_upload(
+    f"{assets_path}/upload",
+    {"name": "Wrong declared type"},
+    "typing.png",
+    PNG_BYTES,
+    "image/png",
+)
+assert status == 201, (status, body)
+extra_asset = json.loads(body)["data"]
+wrong_type_status, wrong_type_body, _ = multipart_upload(
+    f"{assets_path}/upload",
+    {"name": "Wrong type", "asset_type": "document"},
+    "wrong-type.png",
+    PNG_BYTES,
+    "image/png",
+)
+check(
+    "upload-rejects-type-mismatch",
+    wrong_type_status == 400
+    and json.loads(wrong_type_body)["error"]["code"] == "TYPE_MISMATCH",
+)
+json_request("DELETE", f"{assets_path}/{extra_asset['id']}")
+
+status, body, _ = multipart_upload(
+    f"{assets_path}/upload",
+    {"name": "Oversized image"},
+    "oversized.png",
+    PNG_BYTES + (b"\0" * (4 * 1024 * 1024 + 1)),
+    "image/png",
+)
+check(
+    "upload-rejects-oversize",
+    status == 413 and json.loads(body)["error"]["code"] == "FILE_TOO_LARGE",
+)
+
+status, body, _ = multipart_upload(
+    f"{assets_path}/upload",
+    {"name": "Missing managed file"},
+    "missing-file.png",
+    PNG_BYTES,
+    "image/png",
+)
+assert status == 201, (status, body)
+missing_file_asset = json.loads(body)["data"]
+missing_file_path = os.path.join(ASSETS_DIR, missing_file_asset["storage_key"])
+assert os.path.isfile(missing_file_path), missing_file_path
+os.unlink(missing_file_path)
+status, body, _ = request("GET", missing_file_asset["file_url"])
+check(
+    "asset-missing-file-404",
+    status == 404 and json.loads(body)["error"]["code"] == "ASSET_FILE_MISSING",
+)
+json_request("DELETE", f"{assets_path}/{missing_file_asset['id']}")
+check(
+    "asset-upload-temporary-clean",
+    not [name for name in os.listdir(ASSETS_DIR) if name.startswith(".upload-")],
+)
+
 inspiration = json_request(
     "POST",
     f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}/ai/inspire",
@@ -624,6 +921,8 @@ for path in (
     f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/cast/{uuid.uuid4()}",
     f"/studio/api/v1/workplaces/{workplace_id}/documents/{uuid.uuid4()}",
     f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}/versions/{uuid.uuid4()}",
+    f"/studio/api/v1/workplaces/{workplace_id}/assets/{uuid.uuid4()}",
+    f"/studio/api/v1/workplaces/{workplace_id}/assets/{uuid.uuid4()}/file",
 ):
     status, _, _ = request("GET", path)
     assert status == 404, (path, status)
@@ -642,6 +941,8 @@ if STATE_PATH:
                 "character_id": character_id,
                 "scene_id": scene_id,
                 "document_id": document_id,
+                "asset_id": asset_id,
+                "asset_checksum": asset["checksum"],
                 "revision": unchanged["revision"],
                 "content": unchanged["content"],
             },
