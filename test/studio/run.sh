@@ -60,6 +60,8 @@ GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$root/lib:$root" \
   guile "$root/test/studio/storyboard.scm"
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$root/lib:$root" \
   guile "$root/test/studio/character_studio.scm"
+GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$root/lib:$root" \
+  guile "$root/test/studio/visual_consistency.scm"
 
 start_server
 KHALA_STUDIO_TEST_PORT="$port" KHALA_STUDIO_STATE="$state" \

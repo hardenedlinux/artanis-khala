@@ -28,7 +28,7 @@
            (else entry)))
        (load-config)))
 
-(check 'schema-version (= 6 (db:studio-schema-version config)))
+(check 'schema-version (= 7 (db:studio-schema-version config)))
 (define workplace
   (db:studio-create-workplace! config (db:studio-new-id) "Character Studio"
                                "Test world" "#713D3B" #f))

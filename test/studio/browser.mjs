@@ -79,8 +79,13 @@ async function main() {
     await page.getByText("已确认为正式 Avatar").waitFor();
     check("browser-avatar-approved", true);
 
+    await page.getByRole("button", { name: "设为正式全身立绘" }).click();
+    await page.getByText("已确认为正式全身立绘").waitFor();
+    check("browser-full-body-approved", true);
+
     await page.getByRole("button", { name: /^正式设定\s*CANON$/ }).click();
     await page.getByText("作者已确认这张图片为正式头像。").waitFor();
+    await page.getByText("全身立绘也已确认", { exact: false }).waitFor();
     await page.getByRole("heading", { name: "Workshop Standard" }).waitFor();
     check("browser-canon-visible", true);
 

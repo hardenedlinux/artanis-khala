@@ -2,10 +2,17 @@
   #:use-module (rnrs bytevectors)
   #:use-module (khala png)
   #:use-module (ice-9 format)
-  #:export (engine-run-t2i))
+  #:export (engine-run-t2i engine-image-capabilities))
 
 (define (sb name)
   (module-ref (resolve-interface '(sonicboom image)) name))
+
+;; The current MOSS-Image binding accepts text, dimensions and sampler options
+;; only. It has no init image, reference image or reference-list argument.
+(define (engine-image-capabilities)
+  '((reference_images . #f)
+    (reference_mode . "text-only")
+    (max_references . 0)))
 
 (define* (engine-run-t2i params #:key (on-progress (lambda args #t))
                          (cancelled? (lambda () #f)))

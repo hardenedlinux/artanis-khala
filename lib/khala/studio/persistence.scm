@@ -2,6 +2,7 @@
   #:use-module (dbi dbi)
   #:use-module (ice-9 format)
   #:use-module (ice-9 threads)
+  #:use-module (json)
   #:use-module (rnrs bytevectors)
   #:use-module (rnrs io ports)
   #:use-module (srfi srfi-1)
@@ -20,6 +21,7 @@
             studio-update-character!
             studio-archive-character!
             studio-set-character-avatar!
+            studio-set-character-full-body!
             studio-list-character-drafts
             studio-get-character-draft
             studio-save-character-draft!
@@ -37,6 +39,7 @@
             studio-get-scene
             studio-update-scene!
             studio-delete-scene!
+            studio-set-scene-references!
             studio-list-scene-cast
             studio-replace-scene-cast!
             studio-list-assets
@@ -271,13 +274,36 @@
       ON studio_character_outfits(character_id) WHERE is_default = 1
         AND archived_at IS NULL"))
 
+;; Visual consistency references are author approvals, not generated metadata.
+;; A Character keeps two stable approved visual references; a Scene keeps an
+;; ordered set of approved reference Asset IDs. The latter stays as a compact
+;; JSON array so Scene deletion and Workplace scoping remain straightforward.
+(define migration-7
+  (list
+   "ALTER TABLE studio_characters
+      ADD COLUMN full_body_asset_id TEXT"
+   "ALTER TABLE studio_scenes
+      ADD COLUMN reference_asset_ids TEXT NOT NULL DEFAULT '[]'"))
+
 (define (migrations)
   (list (cons 1 migration-1) (cons 2 migration-2)
         (cons 3 migration-3) (cons 4 migration-4)
-        (cons 5 migration-5) (cons 6 migration-6)))
+        (cons 5 migration-5) (cons 6 migration-6)
+        (cons 7 migration-7)))
 
 (define (studio-now)
   (strftime "%Y-%m-%dT%H:%M:%SZ" (gmtime (current-time))))
+
+(define (json-string-array text)
+  (if (or (not (string? text)) (string-null? text))
+      '()
+      (catch #t
+        (lambda ()
+          (let ((value (json-string->scm text)))
+            (cond ((vector? value) (vector->list value))
+                  ((list? value) value)
+                  (else '()))))
+        (lambda _ '()))))
 
 ;; Guile DBI has no UUID primitive. Sixteen bytes from /dev/urandom are
 ;; formatted as RFC 4122 version 4. The random fallback is only for systems
@@ -507,7 +533,7 @@
 (define character-columns
   "id, workplace_id, name, role, summary, concept,
    literary_identity, visual_identity, vocal_identity, performance_identity,
-   avatar_asset_id, created_at, updated_at, archived_at")
+   avatar_asset_id, full_body_asset_id, created_at, updated_at, archived_at")
 
 (define (character-from-row row)
   `((id . ,(row-value row "id"))
@@ -521,6 +547,7 @@
     (vocal_identity . ,(or (row-value row "vocal_identity") "{}"))
     (performance_identity . ,(or (row-value row "performance_identity") "{}"))
     (avatar_asset_id . ,(row-value row "avatar_asset_id"))
+    (full_body_asset_id . ,(row-value row "full_body_asset_id"))
     (created_at . ,(row-value row "created_at"))
     (updated_at . ,(row-value row "updated_at"))
     (archived_at . ,(row-value row "archived_at"))))
@@ -624,6 +651,19 @@
       (with-transaction db
         (lambda ()
           (set-character-avatar! db workplace-id character-id asset-id))))))
+
+(define (studio-set-character-full-body! config workplace-id character-id asset-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now)))
+            (query db "UPDATE studio_characters
+                          SET full_body_asset_id = ?, updated_at = ?
+                        WHERE id = ? AND workplace_id = ? AND archived_at IS NULL"
+                   (sql-value asset-id) now character-id workplace-id)
+            (and (> (dbi-affected-rows db) 0)
+                 (character-by-id db workplace-id character-id))))))))
 
 (define (character-draft-from-row row)
   `((character_id . ,(row-value row "character_id"))
@@ -924,7 +964,7 @@
    time, place, environment, background, prior_events,
    central_question, primary_conflict, turn, dialogue,
    blocking, spatial, performance_direction, camera,
-   storyboard, created_at, updated_at, deleted_at")
+   storyboard, reference_asset_ids, created_at, updated_at, deleted_at")
 
 (define (scene-from-row row)
   `((id . ,(row-value row "id"))
@@ -947,6 +987,7 @@
     (performance_direction . ,(or (row-value row "performance_direction") ""))
     (camera . ,(or (row-value row "camera") ""))
     (storyboard . ,(or (row-value row "storyboard") "[]"))
+    (reference_asset_ids . ,(or (row-value row "reference_asset_ids") "[]"))
     (created_at . ,(row-value row "created_at"))
     (updated_at . ,(row-value row "updated_at"))
     (deleted_at . ,(row-value row "deleted_at"))
@@ -959,7 +1000,8 @@
                   s.status, s.time, s.place, s.environment, s.background,
                   s.prior_events, s.central_question, s.primary_conflict,
                   s.turn, s.dialogue, s.blocking, s.spatial,
-                  s.performance_direction, s.camera, s.storyboard, s.created_at,
+                  s.performance_direction, s.camera, s.storyboard,
+                  s.reference_asset_ids, s.created_at,
                   s.updated_at, s.deleted_at,
                   (SELECT COUNT(*) FROM studio_scene_cast c
                    WHERE c.scene_id = s.id) AS cast_count
@@ -976,7 +1018,8 @@
                      s.status, s.time, s.place, s.environment, s.background,
                      s.prior_events, s.central_question, s.primary_conflict,
                      s.turn, s.dialogue, s.blocking, s.spatial,
-                     s.performance_direction, s.camera, s.storyboard, s.created_at,
+                     s.performance_direction, s.camera, s.storyboard,
+                     s.reference_asset_ids, s.created_at,
                      s.updated_at, s.deleted_at,
                      (SELECT COUNT(*) FROM studio_scene_cast c
                       WHERE c.scene_id = s.id) AS cast_count
@@ -1059,6 +1102,19 @@
                                WHERE resource_type = 'scene' AND resource_id = ?"
                           scene-id)
                    now))))))))
+
+(define (studio-set-scene-references! config workplace-id scene-id asset-ids-json)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now)))
+            (query db "UPDATE studio_scenes
+                          SET reference_asset_ids = ?, updated_at = ?
+                        WHERE id = ? AND workplace_id = ? AND deleted_at IS NULL"
+                   asset-ids-json now scene-id workplace-id)
+            (and (> (dbi-affected-rows db) 0)
+                 (scene-by-id db workplace-id scene-id))))))))
 
 (define scene-cast-columns
   "c.id, c.scene_id, c.character_id, c.objective, c.action, c.conflict,
@@ -1282,6 +1338,37 @@
                    (when (> (dbi-affected-rows db) 0)
                      (query db "DELETE FROM studio_asset_links WHERE asset_id = ?"
                             asset-id)
+                     (query db "UPDATE studio_characters
+                                   SET avatar_asset_id = NULL, updated_at = ?
+                                 WHERE avatar_asset_id = ?"
+                            now asset-id)
+                     (query db "UPDATE studio_characters
+                                   SET full_body_asset_id = NULL, updated_at = ?
+                                 WHERE full_body_asset_id = ?"
+                            now asset-id)
+                     (query db "UPDATE studio_character_outfits
+                                   SET reference_asset_id = NULL, updated_at = ?
+                                 WHERE reference_asset_id = ?"
+                            now asset-id)
+                     (for-each
+                      (lambda (row)
+                        (let* ((scene-id (row-value row "id"))
+                               (ids (json-string-array
+                                     (row-value row "reference_asset_ids")))
+                               (remaining (remove (lambda (id)
+                                                    (equal? id asset-id))
+                                                  ids)))
+                          (unless (= (length remaining) (length ids))
+                            (query db "UPDATE studio_scenes
+                                          SET reference_asset_ids = ?, updated_at = ?
+                                        WHERE id = ? AND workplace_id = ?"
+                                   (scm->json-string (list->vector remaining))
+                                   now scene-id workplace-id))))
+                      (begin
+                        (query db "SELECT id, reference_asset_ids FROM studio_scenes
+                                    WHERE workplace_id = ? AND deleted_at IS NULL"
+                               workplace-id)
+                        (all-rows db)))
                      `((id . ,asset-id)
                        (workplace_id . ,workplace-id)
                        (storage_key . ,(assoc-ref asset 'storage_key))

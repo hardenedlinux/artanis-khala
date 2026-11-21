@@ -6,12 +6,14 @@
   #:use-module (ice-9 optargs)
   #:use-module (ice-9 textual-ports)
   #:use-module (rnrs bytevectors)
+  #:use-module (ice-9 binary-ports)
   #:use-module (json)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-13)
   #:use-module (app models comfy)
   #:use-module (app models ollama)
   #:use-module (khala config)
+  #:use-module (khala engine)
   #:use-module (khala json)
   #:use-module ((khala studio assets) #:prefix fs:)
   #:use-module ((khala studio persistence) #:prefix db:)
@@ -41,12 +43,14 @@
             studio-list-character-artworks
             studio-generate-character-artwork!
             studio-set-character-avatar!
+            studio-set-character-full-body!
             studio-character-canon
             studio-list-scenes
             studio-create-scene!
             studio-get-scene
             studio-update-scene!
             studio-delete-scene!
+            studio-set-scene-references!
             studio-list-scene-cast
             studio-update-scene-cast!
             studio-get-storyboard
@@ -365,18 +369,25 @@
     ("performance_identity"
      . ,(identity-from-json (assoc-ref character 'performance_identity)))
     ("avatar_asset_id" . ,(mark (assoc-ref character 'avatar_asset_id)))
+    ("full_body_asset_id" . ,(mark (assoc-ref character 'full_body_asset_id)))
     ("created_at" . ,(assoc-ref character 'created_at))
     ("updated_at" . ,(assoc-ref character 'updated_at))
     ("archived_at" . ,(mark (assoc-ref character 'archived_at)))))
 
 (define (public-character-with-avatar config character)
   (let* ((avatar-id (assoc-ref character 'avatar_asset_id))
+         (full-body-id (assoc-ref character 'full_body_asset_id))
          (workplace-id (assoc-ref character 'workplace_id))
          (asset (and avatar-id
-                     (db:studio-get-asset config workplace-id avatar-id))))
+                     (db:studio-get-asset config workplace-id avatar-id)))
+         (full-body (and full-body-id
+                         (db:studio-get-asset config workplace-id
+                                              full-body-id))))
     (append (public-character character)
             `(("avatar" . ,(mark (and asset
-                                      (public-asset asset #:config config))))))))
+                                      (public-asset asset #:config config))))
+              ("full_body" . ,(mark (and full-body
+                                         (public-asset full-body #:config config))))))))
 
 (define (public-scene scene)
   `(("id" . ,(assoc-ref scene 'id))
@@ -404,6 +415,10 @@
     ("cast_count" . ,(or (assoc-ref scene 'cast_count) 0))
     ("storyboard_count" . ,(length (storyboard-shots
                                     (assoc-ref scene 'storyboard))))
+    ("reference_asset_ids"
+     . ,(json-string-list (assoc-ref scene 'reference_asset_ids)))
+    ("reference_count"
+     . ,(length (json-string-list (assoc-ref scene 'reference_asset_ids))))
     ("created_at" . ,(assoc-ref scene 'created_at))
     ("updated_at" . ,(assoc-ref scene 'updated_at))
     ("deleted_at" . ,(mark (assoc-ref scene 'deleted_at)))))
@@ -456,6 +471,20 @@
   (let ((engine (config-ref config 'engine)))
     (if (equal? engine "sonicboom") "sonicboom" "fake")))
 
+(define (studio-image-generation-capabilities config)
+  (let* ((engine-name (configured-engine config))
+         (engine (if (equal? engine-name "sonicboom") 'sonicboom 'fake))
+         (capabilities (engine-image-capabilities engine)))
+    `(("engine" . ,engine-name)
+      ("available" . ,(and (or (equal? engine-name "fake")
+                               (sonicboom-available?))
+                           #t))
+      ("reference_images" . ,(and (assq-ref capabilities 'reference_images)
+                                  #t))
+      ("reference_mode" . ,(or (assq-ref capabilities 'reference_mode)
+                               "text-only"))
+      ("max_references" . ,(or (assq-ref capabilities 'max_references) 0)))))
+
 (define (available-models config)
   (define installed (installed-models config))
   (define configured (configured-model config))
@@ -497,7 +526,8 @@
       ("engine" . ,engine)
       ("default_model" . ,(mark default))
       ("models" . ,models)
-      ("ai_available" . ,(and available? #t)))))
+      ("ai_available" . ,(and available? #t))
+      ("image_generation" . ,(studio-image-generation-capabilities config)))))
 
 (define (studio-list-workplaces config)
   (map public-workplace (db:studio-list-workplaces config)))
@@ -1015,15 +1045,18 @@
       ("removed" . #t))))
 
 (define (json-string-list text)
-  (if (or (not (string? text)) (string-null? text))
-      '()
-      (catch #t
-        (lambda ()
-          (let ((value (json-string->scm text)))
-            (cond ((vector? value) (vector->list value))
-                  ((list? value) value)
-                  (else '()))))
-        (lambda _ '()))))
+  (cond
+   ((vector? text) (vector->list text))
+   ((list? text) text)
+   ((or (not (string? text)) (string-null? text)) '())
+   (else
+    (catch #t
+      (lambda ()
+        (let ((value (json-string->scm text)))
+          (cond ((vector? value) (vector->list value))
+                ((list? value) value)
+                (else '()))))
+      (lambda _ '())))))
 
 (define (string-list-json values)
   (json-encode (json-normalize (if (list? values) values '()))))
@@ -1436,6 +1469,19 @@
      (db:studio-set-character-avatar! config wid cid
                                       (string-downcase asset-id)))))
 
+(define (studio-set-character-full-body! config workplace-id character-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (asset-id (string-field body "asset_id" #:required #t #:max 36)))
+    (require-character-image-asset config wid cid asset-id)
+    (public-character-with-avatar
+     config
+     (db:studio-set-character-full-body! config wid cid
+                                          (string-downcase asset-id)))))
+
 (define (studio-set-character-outfit-reference! config workplace-id character-id
                                                 outfit-id body)
   (let* ((body (or body '()))
@@ -1460,9 +1506,15 @@
          (character (require-character config wid character-id))
          (cid (assoc-ref character 'id))
          (avatar-id (assoc-ref character 'avatar_asset_id))
+         (full-body-id (assoc-ref character 'full_body_asset_id))
          (avatar (and avatar-id (db:studio-get-asset config wid avatar-id))))
     `(("character" . ,(public-character character))
       ("avatar" . ,(mark (and avatar (public-asset avatar #:config config))))
+      ("full_body"
+       . ,(mark (and full-body-id
+                     (db:studio-get-asset config wid full-body-id)
+                     (public-asset (db:studio-get-asset config wid full-body-id)
+                                   #:config config))))
       ("outfits" . ,(map public-character-outfit
                          (db:studio-list-character-outfits config wid cid)))
       ("drafts" . ,(public-character-drafts
@@ -1649,6 +1701,55 @@
       ("workplace_id" . ,wid)
       ("deleted_at" . ,deleted))))
 
+(define max-scene-reference-images 12)
+
+(define (scene-linked-image-asset config wid sid asset-id)
+  (let ((asset (db:studio-get-asset config wid asset-id)))
+    (unless asset
+      (api-fail 404 "NOT_FOUND" "Asset not found"))
+    (unless (equal? (assoc-ref asset 'asset_type) "image")
+      (api-fail 422 "INVALID_ASSET" "Scene references must be image Assets"))
+    (unless (find (lambda (entry) (equal? (assoc-ref entry 'id) asset-id))
+                  (db:studio-list-linked-assets config wid "scene" sid))
+      (api-fail 422 "ASSET_NOT_LINKED"
+                "Every Scene reference must be linked to this Scene"))
+    asset))
+
+(define (studio-set-scene-references! config workplace-id scene-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (scene (require-scene config wid scene-id))
+         (sid (assoc-ref scene 'id)))
+    (unless (object-has? body "asset_ids")
+      (api-fail 400 "VALIDATION_ERROR" "asset_ids is required"))
+    (let* ((raw (object-ref body "asset_ids"))
+           (values (json-array-list raw "asset_ids")))
+      (when (> (length values) max-scene-reference-images)
+        (api-fail 400 "VALIDATION_ERROR"
+                  (format #f "asset_ids supports at most ~a Scene references"
+                          max-scene-reference-images)))
+      (let ((ids
+             (map (lambda (value)
+                    (unless (and (string? value) (valid-uuid? value))
+                      (api-fail 400 "VALIDATION_ERROR"
+                                "asset_ids must contain UUID strings"))
+                    (string-downcase value))
+                  values)))
+        (let loop ((rest ids) (seen '()))
+          (when (pair? rest)
+            (when (member (car rest) seen string=?)
+              (api-fail 400 "VALIDATION_ERROR"
+                        "asset_ids must not contain duplicates"))
+            (loop (cdr rest) (cons (car rest) seen))))
+        (for-each (lambda (asset-id)
+                    (scene-linked-image-asset config wid sid asset-id))
+                  ids)
+        (public-scene
+         (or (db:studio-set-scene-references!
+              config wid sid (string-list-json ids))
+             (api-fail 404 "NOT_FOUND" "Scene not found")))))))
+
 (define (studio-list-scene-cast config workplace-id scene-id)
   (let* ((workplace (require-workplace config workplace-id))
          (wid (assoc-ref workplace 'id))
@@ -1725,6 +1826,11 @@
 (define (storyboard-json shots)
   (json-encode (json-normalize (if (list? shots) shots '()))))
 
+(define (storyboard-json-list value)
+  (cond ((vector? value) (vector->list value))
+        ((list? value) value)
+        (else '())))
+
 (define (json-array-list value label)
   (cond
    ((null? value) '())
@@ -1748,30 +1854,42 @@
                          legacy-expression))
          (performance (or (assoc-ref shot "performance") ""))
          (expression-action (or (storyboard-join-text expression performance)
-                                legacy-expression)))
-    (storyboard-shot-set
-     (storyboard-shot-set
-      (storyboard-shot-set
-       (storyboard-shot-set
-        (storyboard-shot-set
-         (storyboard-shot-set
-          (storyboard-shot-set
-           (storyboard-shot-set
-            (storyboard-shot-set shot "action" action)
-            "content" action)
-           "dramatic_beat" (or (assoc-ref shot "dramatic_beat") ""))
-          "expression" expression)
-         "performance" performance)
-        "expression_action" expression-action)
-       "source" (or (assoc-ref shot "source") "deterministic"))
-      "model" (or (assoc-ref shot "model") ""))
-     "author_edited" (and (eq? (assoc-ref shot "author_edited") #t) #t))))
+                                legacy-expression))
+         (result shot))
+    (set! result (storyboard-shot-set result "action" action))
+    (set! result (storyboard-shot-set result "content" action))
+    (set! result (storyboard-shot-set result "dramatic_beat"
+                                      (or (assoc-ref shot "dramatic_beat") "")))
+    (set! result (storyboard-shot-set result "expression" expression))
+    (set! result (storyboard-shot-set result "performance" performance))
+    (set! result (storyboard-shot-set result "expression_action"
+                                      expression-action))
+    (set! result (storyboard-shot-set result "source"
+                                      (or (assoc-ref shot "source") "deterministic")))
+    (set! result (storyboard-shot-set result "model"
+                                      (or (assoc-ref shot "model") "")))
+    (set! result (storyboard-shot-set result "author_edited"
+                                      (and (eq? (assoc-ref shot "author_edited") #t)
+                                           #t)))
+    (set! result (storyboard-shot-set result "character_ids"
+                                      (storyboard-json-list
+                                       (assoc-ref shot "character_ids"))))
+    (set! result (storyboard-shot-set result "characters"
+                                      (storyboard-json-list
+                                       (assoc-ref shot "characters"))))
+    (set! result (storyboard-shot-set result "character_outfits"
+                                      (storyboard-json-list
+                                       (assoc-ref shot "character_outfits"))))
+    (let ((usage (assoc-ref shot "reference_usage")))
+      (storyboard-shot-set result "reference_usage"
+                           (if (or (not usage) (eq? usage 'null)) 'null usage)))))
 
 (define (storyboard-payload config scene)
   `(("scene_id" . ,(assoc-ref scene 'id))
     ("shots" . ,(map storyboard-normalize-shot
                      (storyboard-shots (assoc-ref scene 'storyboard))))
     ("generation_available" . ,(and (image-generation-available? config) #t))
+    ("image_generation" . ,(studio-image-generation-capabilities config))
     ("updated_at" . ,(assoc-ref scene 'updated_at))))
 
 (define storyboard-visual-fields
@@ -1961,6 +2079,8 @@
       ("status" . "pending")
       ("source" . "deterministic")
       ("model" . ,model)
+      ("character_outfits" . ())
+      ("reference_usage" . null)
       ("author_edited" . #f))))
 
 (define (storyboard-generated-shots scene cast characters references model)
@@ -2050,6 +2170,36 @@
       #:performance "End on a reaction that carries the consequence without announcing it in dialogue."
       #:model model))))
 
+(define (storyboard-fill-default-outfits config wid shots)
+  (map (lambda (shot)
+         (let* ((ids (or (assoc-ref shot "character_ids") '()))
+                (existing (or (assoc-ref shot "character_outfits") '()))
+                (mapping
+                 (fold
+                  (lambda (character-id result)
+                    (if (find (lambda (entry)
+                                (equal? (assoc-ref entry "character_id")
+                                        character-id))
+                              result)
+                        result
+                        (let ((outfit (character-default-outfit
+                                       config wid character-id)))
+                          (if outfit
+                              (append
+                               result
+                               (list
+                                (list (cons "character_id" character-id)
+                                      (cons "outfit_id"
+                                            (assoc-ref outfit 'id)))))
+                              result))))
+                  (filter (lambda (entry)
+                            (member (or (assoc-ref entry "character_id") "")
+                                    ids string=?))
+                          existing)
+                  ids)))
+           (storyboard-shot-set shot "character_outfits" mapping)))
+       shots))
+
 (define (storyboard-current-shots scene)
   (storyboard-shots (assoc-ref scene 'storyboard)))
 
@@ -2070,9 +2220,61 @@
     ,(assoc-ref shot "performance")
     ,(assoc-ref shot "camera")
     ,(assoc-ref shot "visual_description")
-    ,(assoc-ref shot "image_prompt")))
+    ,(assoc-ref shot "image_prompt")
+    ,(sort
+      (map (lambda (entry)
+             (format #f "~a:~a"
+                     (or (assoc-ref entry "character_id") "")
+                     (or (assoc-ref entry "outfit_id") "")))
+           (or (assoc-ref shot "character_outfits") '()))
+      string<?)))
 
-(define (storyboard-shot-value value index current cast)
+(define (storyboard-character-outfits-field value index ids previous
+                                            config wid)
+  (define (validate entry entry-index)
+    (unless (object? entry)
+      (api-fail 400 "VALIDATION_ERROR"
+                (format #f "shots[~a].character_outfits[~a] must be an object"
+                        index entry-index)))
+    (require-object-fields
+     entry (format #f "shots[~a].character_outfits[~a]" index entry-index)
+     '("character_id" "outfit_id"))
+    (let* ((character-id (object-ref entry "character_id"))
+           (outfit-id (object-ref entry "outfit_id")))
+      (unless (and (string? character-id) (valid-uuid? character-id))
+        (api-fail 400 "VALIDATION_ERROR"
+                  "character_outfits.character_id must be a UUID"))
+      (unless (and (string? outfit-id) (valid-uuid? outfit-id))
+        (api-fail 400 "VALIDATION_ERROR"
+                  "character_outfits.outfit_id must be a UUID"))
+      (let ((character-id (string-downcase character-id))
+            (outfit-id (string-downcase outfit-id)))
+        (unless (member character-id ids string=?)
+          (api-fail 422 "INVALID_SHOT_OUTFIT"
+                    "Every Shot Outfit must belong to a Character in that Shot"))
+        (unless (db:studio-get-character-outfit config wid character-id outfit-id)
+          (api-fail 422 "INVALID_SHOT_OUTFIT"
+                    "Every Shot Outfit must belong to its Character and Workplace"))
+        `(("character_id" . ,character-id) ("outfit_id" . ,outfit-id)))))
+  (if (not (object-has? value "character_outfits"))
+      (filter (lambda (entry)
+                (member (or (assoc-ref entry "character_id") "") ids string=?))
+              previous)
+      (let ((entries (json-array-list (object-ref value "character_outfits")
+                                      (format #f "shots[~a].character_outfits"
+                                              index))))
+        (let loop ((rest entries) (result '()) (seen '()) (position 0))
+          (if (null? rest)
+              (reverse result)
+              (let ((entry (validate (car rest) position)))
+                (let ((character-id (assoc-ref entry "character_id")))
+                  (when (member character-id seen string=?)
+                    (api-fail 400 "VALIDATION_ERROR"
+                              "A Shot can select only one Outfit per Character"))
+                  (loop (cdr rest) (cons entry result)
+                        (cons character-id seen) (+ position 1)))))))))
+
+(define (storyboard-shot-value value index current cast config wid)
   (unless (object? value)
     (api-fail 400 "VALIDATION_ERROR"
               (format #f "shots[~a] must be an object" index)))
@@ -2080,11 +2282,11 @@
    value (format #f "shots[~a]" index)
    '("id" "number" "dramatic_beat" "action" "content" "character_ids"
      "camera" "expression" "performance" "expression_action"
-     "visual_description" "image_prompt"
+     "visual_description" "image_prompt" "character_outfits"
      ;; Derived fields are accepted for round-tripping from the UI, but the
      ;; server preserves their authoritative values below.
      "characters" "asset_id" "file_url" "status" "source" "model"
-     "author_edited"))
+     "author_edited" "reference_usage"))
   (let* ((raw-id (object-ref value "id"))
          (id (cond ((not raw-id) (db:studio-new-id))
                    ((valid-uuid? raw-id) (string-downcase raw-id))
@@ -2184,6 +2386,13 @@
                               (or (assoc-ref previous "image_prompt") "")
                               "")
                           max-shot-prompt-length))
+           (character-outfits
+            (storyboard-character-outfits-field
+             value index ids
+             (if previous
+                 (or (assoc-ref previous "character_outfits") '())
+                 '())
+             config wid))
            (asset-id (if previous
                          (let ((asset (assoc-ref previous "asset_id")))
                            (if (and asset (not (eq? asset 'null))) asset 'null))
@@ -2199,6 +2408,9 @@
                        (or (assoc-ref previous "source") "manual")
                        "manual"))
            (model (if previous (or (assoc-ref previous "model") "") ""))
+           (reference-usage (if previous
+                                (or (assoc-ref previous "reference_usage") 'null)
+                                'null))
            (candidate
             `(("id" . ,id)
               ("number" . ,number)
@@ -2218,6 +2430,8 @@
               ("status" . ,status)
               ("source" . ,source)
               ("model" . ,model)
+              ("character_outfits" . ,character-outfits)
+              ("reference_usage" . ,reference-usage)
               ("author_edited" . #f)))
            (author-edited
             (if previous
@@ -2228,7 +2442,7 @@
       (storyboard-shot-set candidate "author_edited"
                            (and author-edited #t)))))
 
-(define (storyboard-shots-from-body body current cast)
+(define (storyboard-shots-from-body body current cast config wid)
   (unless (object-has? body "shots")
     (api-fail 400 "VALIDATION_ERROR" "shots is required"))
   (let* ((values (json-array-list (object-ref body "shots") "shots"))
@@ -2238,7 +2452,7 @@
                 (format #f "shots must contain between 1 and ~a shots"
                         max-storyboard-shots)))
     (let ((shots (map (lambda (value index)
-                        (storyboard-shot-value value index current cast))
+                        (storyboard-shot-value value index current cast config wid))
                       values (iota count))))
       (let loop ((rest shots) (seen '()))
         (when (pair? rest)
@@ -2508,6 +2722,8 @@
              ("status" . "pending")
              ("source" . "ai")
              ("model" . ,model)
+             ("character_outfits" . ())
+             ("reference_usage" . null)
              ("author_edited" . #f))))
        parsed (iota (length parsed))))
 
@@ -2586,11 +2802,13 @@
                             cast))
                (references (storyboard-asset-references config wid sid cast))
                (shots
-                (if (equal? (configured-engine config) "fake")
-                    (storyboard-generated-shots scene cast characters references
-                                                (default-model config))
-                    (storyboard-run-ai-generation
-                     config scene cast characters references body)))
+                (storyboard-fill-default-outfits
+                 config wid
+                 (if (equal? (configured-engine config) "fake")
+                     (storyboard-generated-shots scene cast characters references
+                                                 (default-model config))
+                     (storyboard-run-ai-generation
+                      config scene cast characters references body))))
                (saved (db:studio-update-scene!
                        config wid sid
                        `((storyboard . ,(storyboard-json shots))))))
@@ -2604,7 +2822,7 @@
          (cast (db:studio-list-scene-cast config wid sid))
          (shots (storyboard-shots-from-body body
                                             (storyboard-current-shots scene)
-                                            cast))
+                                            cast config wid))
          (saved (db:studio-update-scene!
                  config wid sid
                  `((storyboard . ,(storyboard-json shots))))))
@@ -2612,6 +2830,157 @@
 
 (define (storyboard-public-asset config asset)
   (public-asset asset #:include-links #t #:config config))
+
+(define max-storyboard-reference-images 24)
+
+(define (storyboard-reference-bytes config asset)
+  (let* ((storage-key (and asset (assoc-ref asset 'storage_key)))
+         (path (and storage-key
+                    (fs:studio-asset-resolve-path config storage-key))))
+    (unless path
+      (api-fail 422 "REFERENCE_FILE_MISSING"
+                "An approved reference image is unavailable"))
+    (let ((bytes (call-with-input-file path get-bytevector-all)))
+      (unless (and bytes (> (bytevector-length bytes) 0))
+        (api-fail 422 "REFERENCE_FILE_MISSING"
+                  "An approved reference image is empty"))
+      bytes)))
+
+(define (storyboard-reference-descriptor config wid role kind asset
+                                          character-id outfit-id)
+  (let ((asset-id (assoc-ref asset 'id)))
+    `((role . ,role)
+      (reference_kind . ,kind)
+      (asset_id . ,asset-id)
+      (character_id . ,character-id)
+      (outfit_id . ,outfit-id)
+      (workplace_id . ,wid)
+      (name . ,(assoc-ref asset 'name))
+      (mime_type . ,(assoc-ref asset 'mime_type))
+      (checksum . ,(assoc-ref asset 'checksum))
+      (width . ,(assoc-ref asset 'width))
+      (height . ,(assoc-ref asset 'height))
+      (data . ,(storyboard-reference-bytes config asset)))))
+
+(define (storyboard-approved-reference-asset config wid asset-id label)
+  (or (and asset-id (db:studio-get-asset config wid asset-id))
+      (api-fail 422 "REFERENCE_ASSET_MISSING"
+                (format #f "~a points to an unavailable Asset" label))))
+
+(define (storyboard-shot-outfit-id shot character-id)
+  (let ((entry (find (lambda (item)
+                       (equal? (assoc-ref item "character_id") character-id))
+                     (or (assoc-ref shot "character_outfits") '()))))
+    (and entry (assoc-ref entry "outfit_id"))))
+
+(define (storyboard-approved-references config wid scene shot)
+  (let* ((shot-ids (or (assoc-ref shot "character_ids") '()))
+         (character-references
+          (append-map
+           (lambda (character-id)
+             (let* ((character (db:studio-get-character config wid character-id))
+                    (_ (unless character
+                         (api-fail 422 "INVALID_SHOT_CHARACTER"
+                                   "A Shot Character is no longer available")))
+                    (full-body-id (assoc-ref character 'full_body_asset_id))
+                    (avatar-id (assoc-ref character 'avatar_asset_id))
+                    (approved-id (or full-body-id avatar-id))
+                    (kind (if full-body-id "full_body" "avatar"))
+                    (character-reference
+                     (if approved-id
+                         (let ((asset
+                                (storyboard-approved-reference-asset
+                                 config wid approved-id
+                                 (format #f "~a's approved ~a"
+                                         (assoc-ref character 'name) kind))))
+                           (list (storyboard-reference-descriptor
+                                  config wid "character" kind asset
+                                  character-id #f)))
+                         '()))
+                    (outfit-id (or (storyboard-shot-outfit-id shot character-id)
+                                   (let ((outfit (character-default-outfit
+                                                  config wid character-id)))
+                                     (and outfit (assoc-ref outfit 'id)))))
+                    (outfit (and outfit-id
+                                 (db:studio-get-character-outfit
+                                  config wid character-id outfit-id)))
+                    (_ (when (and outfit-id (not outfit))
+                         (api-fail 422 "INVALID_SHOT_OUTFIT"
+                                   "A selected Shot Outfit is no longer available")))
+                    (outfit-reference-id (and outfit
+                                              (assoc-ref outfit
+                                                         'reference_asset_id)))
+                    (outfit-reference
+                     (if outfit-reference-id
+                         (let ((asset
+                                (storyboard-approved-reference-asset
+                                 config wid outfit-reference-id
+                                 (format #f "Outfit ~a"
+                                         (assoc-ref outfit 'name)))))
+                           (list (storyboard-reference-descriptor
+                                  config wid "outfit" "outfit_reference" asset
+                                  character-id outfit-id)))
+                         '())))
+               (append character-reference outfit-reference)))
+           shot-ids))
+         (scene-references
+          (let ((scene-reference-ids
+                 (json-string-list (assoc-ref scene 'reference_asset_ids))))
+            (map (lambda (asset-id)
+                   (let ((asset
+                          (storyboard-approved-reference-asset
+                           config wid asset-id "A Scene reference")))
+                     (storyboard-reference-descriptor
+                      config wid "scene" "scene_reference" asset #f #f)))
+                 scene-reference-ids)))
+         (references (append character-references scene-references)))
+    (when (> (length references) max-storyboard-reference-images)
+      (api-fail 422 "TOO_MANY_REFERENCES"
+                (format #f "A Shot supports at most ~a approved reference images"
+                        max-storyboard-reference-images)))
+    references))
+
+(define (storyboard-reference-trace config wid reference applied)
+  (let ((asset-id (assoc-ref reference 'asset_id))
+        (character-id (assoc-ref reference 'character_id))
+        (outfit-id (assoc-ref reference 'outfit_id)))
+    `(("role" . ,(assoc-ref reference 'role))
+      ("reference_kind" . ,(assoc-ref reference 'reference_kind))
+      ("asset_id" . ,asset-id)
+      ("character_id" . ,(mark character-id))
+      ("outfit_id" . ,(mark outfit-id))
+      ("name" . ,(assoc-ref reference 'name))
+      ("mime_type" . ,(assoc-ref reference 'mime_type))
+      ("checksum" . ,(assoc-ref reference 'checksum))
+      ("width" . ,(mark (assoc-ref reference 'width)))
+      ("height" . ,(mark (assoc-ref reference 'height)))
+      ("file_url"
+       . ,(format #f "/studio/api/v1/workplaces/~a/assets/~a/file"
+                  wid asset-id))
+      ("applied" . ,(and applied #t)))))
+
+(define (storyboard-reference-usage config wid references)
+  (let* ((capabilities (studio-image-generation-capabilities config))
+         (supports (assoc-ref capabilities "reference_images"))
+         (applied (and supports (pair? references) #t))
+         (mode (cond (applied "reference-conditioned")
+                     (supports "text-only")
+                     (else "text-only")))
+         (message
+          (cond
+           (applied "Approved reference image bytes were passed to the image adapter.")
+           ((pair? references)
+            "Approved references were collected, but the current image adapter is text-to-image only; they were not applied.")
+           (else "No approved reference images were selected."))))
+    `(("engine" . ,(assoc-ref capabilities "engine"))
+      ("mode" . ,mode)
+      ("applied" . ,(and applied #t))
+      ("reference_mode" . ,(assoc-ref capabilities "reference_mode"))
+      ("message" . ,message)
+      ("references"
+       . ,(map (lambda (reference)
+                 (storyboard-reference-trace config wid reference applied))
+               references)))))
 
 (define (studio-generate-storyboard-image! config workplace-id scene-id shot-id)
   (let* ((workplace (require-workplace config workplace-id))
@@ -2634,12 +3003,20 @@
                            (not (string-null? (string-trim-both prompt))))
                 (api-fail 422 "SHOT_PROMPT_REQUIRED"
                           "The Storyboard shot needs an image prompt")))
+           (references
+            (storyboard-approved-references config wid scene shot))
+           (reference-usage
+            (storyboard-reference-usage config wid references))
+           (apply-references?
+            (eq? (assoc-ref reference-usage "applied") #t))
            (pngs
             (catch #t
               (lambda ()
                 (comfy-render-image! config prompt storyboard-image-width
                                      storyboard-image-height
-                                     (+ (current-time) (random 1000000))))
+                                     (+ (current-time) (random 1000000))
+                                     #:references
+                                     (if apply-references? references '())))
               (lambda (key . args)
                 (format (current-error-port) "Storyboard image generation failed: ~s ~s~%"
                         key args)
@@ -2672,7 +3049,12 @@
                       ("shot_id" . ,(assoc-ref shot "id"))
                       ("shot_number" . ,shot-number)
                       ("width" . ,storyboard-image-width)
-                      ("height" . ,storyboard-image-height)))))
+                      ("height" . ,storyboard-image-height)
+                      ("reference_mode" . ,(assoc-ref reference-usage "mode"))
+                      ("references_applied"
+                       . ,(assoc-ref reference-usage "applied"))
+                      ("references"
+                       . ,(assoc-ref reference-usage "references"))))))
                  (values
                   `((name . ,(format #f "Storyboard ~a — ~a"
                                      shot-number (assoc-ref scene 'title)))
@@ -2702,9 +3084,11 @@
                                        (assoc-ref shot "id"))
                                (storyboard-shot-set
                                 (storyboard-shot-set
-                                 (storyboard-shot-set item "asset_id" asset-id)
-                                 "file_url" file-url)
-                                "status" "generated")
+                                 (storyboard-shot-set
+                                  (storyboard-shot-set item "asset_id" asset-id)
+                                  "file_url" file-url)
+                                 "status" "generated")
+                                "reference_usage" reference-usage)
                                item))
                          shots))
                    (_ (db:studio-add-asset-link! config wid asset-id "scene" sid))
@@ -2716,7 +3100,8 @@
                                                  (assoc-ref shot "id")))
                                        (storyboard-current-shots saved))))
               `(("shot" . ,updated-shot)
-                ("asset" . ,(storyboard-public-asset config asset))))))
+                ("asset" . ,(storyboard-public-asset config asset))
+                ("reference_usage" . ,reference-usage)))))
         (lambda (key . args)
           (when storage-key
             (fs:studio-asset-delete-file! config storage-key))

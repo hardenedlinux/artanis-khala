@@ -102,9 +102,13 @@
 ;; queue and WebSocket protocol. This keeps an explicit Storyboard action quick
 ;; to demo without introducing another inference subsystem.
 (define* (render-image! config prompt #:key (width 768) (height 432)
-                         (seed 0) (steps 12) (negative ""))
+                         (seed 0) (steps 12) (negative "")
+                         (references '()))
   (let* ((engine-name (if (equal? (config-ref config 'engine) "sonicboom")
                           'sonicboom 'fake))
+         (image-capabilities (engine-image-capabilities engine-name))
+         (accepts-references
+          (and (assq-ref image-capabilities 'reference_images) #t))
          (configured (or (config-ref config 'studio_model)
                          (config-ref config 'default_model) ""))
          (model (and (string? configured) (not (string-null? configured))
@@ -119,6 +123,9 @@
                    (batch_size . 1)))
          (params (if (and model (eq? engine-name 'sonicboom))
                      (acons 'model model params)
+                     params))
+         (params (if (and accepts-references (pair? references))
+                     (acons 'references references params)
                      params)))
     (engine-run-t2i (with-model-path config params) #:engine engine-name)))
 (define (preview-step? step) (zero? (modulo step 5)))

@@ -486,6 +486,15 @@
              config (params rc "workplace_id") (params rc "character_id")
              (body-json rc)))))))
 
+(post "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/full-body"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-set-character-full-body!
+             config (params rc "workplace_id") (params rc "character_id")
+             (body-json rc)))))))
+
 (get "/studio/api/v1/workplaces/:workplace_id/characters/:character_id/canon"
      (lambda (rc)
        (api-handler
@@ -534,6 +543,15 @@
                   (reply-success
                    (studio-delete-scene! config (params rc "workplace_id")
                                          (params rc "scene_id")))))))
+
+(put "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id/references"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-set-scene-references!
+            config (params rc "workplace_id") (params rc "scene_id")
+            (body-json rc)))))))
 
 (get "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id/cast"
      (lambda (rc)

@@ -33,7 +33,7 @@ studio_model =
   `fake` and `sonicboom`; Studio does not introduce another inference backend.
 
 The database is initialized on first use and runs migrations through version
-`6`. The schema includes:
+`7`. The schema includes:
 
 - `studio_schema_migrations`
 - `studio_workplaces`
@@ -50,15 +50,18 @@ The database is initialized on first use and runs migrations through version
 
 `studio_characters` stores a stable UUID, `workplace_id`, `name`, `role`,
 `summary`, the original `concept`, four independent JSON identity objects,
-an approved `avatar_asset_id`, timestamps, and a nullable `archived_at`
-soft-delete marker. Identity drafts are held in a physically separate table so
-an AI proposal cannot become Canon without an explicit apply request. Outfits
-are character-owned rows with JSON string arrays for components, materials,
-colours, accessories and special features.
+author-approved `avatar_asset_id` and `full_body_asset_id` references,
+timestamps, and a nullable `archived_at` soft-delete marker. Identity drafts
+are held in a physically separate table so an AI proposal cannot become Canon
+without an explicit apply request. Outfits are character-owned rows with JSON
+string arrays for components, materials, colours, accessories and special
+features.
 
 `studio_scenes` stores the structured dramatic fields plus a `storyboard` JSON
-column. Migration `5` adds this column. Storyboards remain owned by the Scene;
-they are not a separate document or workflow subsystem.
+column. Migration `5` adds this column. Migration `7` adds
+`reference_asset_ids`, an ordered JSON array of author-approved Scene reference
+image Asset IDs. Storyboards remain owned by the Scene; they are not a separate
+document or workflow subsystem.
 
 `studio_assets` stores Asset metadata and a server-generated `storage_key`, but
 never stores a client-supplied filesystem path. File bytes live beneath
@@ -99,7 +102,9 @@ curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/capabilities
 ```
 
 The model list comes from the existing installed LLM files. Under the fake
-engine, a usable `fake` model is also exposed.
+engine, a usable `fake` model is also exposed. The `image_generation` object
+reports the current image adapter, availability, reference-image support and
+reference mode. It does not introduce a second model or engine catalogue.
 
 ## Workplaces
 
@@ -357,10 +362,15 @@ curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/
 Generation never overwrites an older Asset and never writes Character Canon.
 Repeated generation creates a new Asset.
 
-Approve an image as the formal Avatar, or as an Outfit reference image:
+Approve an image as the formal Avatar, the formal Full Body reference, or as an
+Outfit reference image:
 
 ```sh
 curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/avatar \
+  -H 'Content-Type: application/json' \
+  -d '{"asset_id":"'"$ASSET_ID"'"}'
+
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/full-body \
   -H 'Content-Type: application/json' \
   -d '{"asset_id":"'"$ASSET_ID"'"}'
 
@@ -369,8 +379,10 @@ curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPL
   -d '{"asset_id":"'"$ASSET_ID"'"}'
 ```
 
-Both endpoints require an image Asset from the same Workplace that is already
-linked to this Character. Cross-Workplace Assets return `404`/`422`.
+All three endpoints require an image Asset from the same Workplace that is
+already linked to this Character. Cross-Workplace Assets return `404`/`422`.
+The full-body approval is separate from the Avatar: Storyboard reference
+selection prefers an approved full body and falls back to the approved Avatar.
 
 Read the consolidated author-approved Canon view:
 
@@ -378,8 +390,8 @@ Read the consolidated author-approved Canon view:
 curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/canon
 ```
 
-It returns the Character identity, approved Avatar Asset, active Outfits and
-any pending AI drafts. Drafts are explicitly not Canon.
+It returns the Character identity, approved Avatar and Full Body Assets, active
+Outfits and any pending AI drafts. Drafts are explicitly not Canon.
 
 ## Scenes and Casting
 
@@ -452,6 +464,26 @@ rows are not deleted:
 ```sh
 curl --noproxy '*' -X DELETE http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID
 ```
+
+### Scene References
+
+Author-approved Scene reference images are stored as an ordered set of Asset
+IDs. Every ID must identify an image Asset in the same Workplace that is
+already linked to this Scene; otherwise the API returns `422`
+`INVALID_ASSET` or `ASSET_NOT_LINKED`. Duplicate IDs and more than 12 images
+are rejected. Passing an empty array clears the approval set without deleting
+any Asset.
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/references \
+  -H 'Content-Type: application/json' \
+  -d '{"asset_ids":["'"$ASSET_ID"'"]}'
+```
+
+The Scene response includes `reference_asset_ids` and `reference_count`.
+Generating a Storyboard image collects only IDs approved here; other images
+merely linked to the Scene remain available as Assets but are not silently
+treated as references.
 
 ### Scene Cast
 
@@ -569,6 +601,12 @@ Shot responses also include `source` (`ai`, `deterministic`, or `manual`) and th
 `model` that produced an AI draft. AI output is only a draft; the author can
 edit and save every shot before choosing to generate an image.
 
+Each shot may also carry `character_outfits`, an array of
+`{"character_id":"...","outfit_id":"..."}` entries selecting one Outfit per
+Character in that shot. Both IDs must belong to the Scene Cast and the same
+Workplace. The selection is Scene/Shot context: it changes the costume used for
+that image without modifying the Character's Visual Canon or default Outfit.
+
 Generate an image for one shot:
 
 ```sh
@@ -581,6 +619,32 @@ are stored in `studio_assets_dir`, the Asset is created with
 `source = "generated"`, and it is linked to the current Scene. Regenerating a
 shot creates a new Asset; the previous Asset is not overwritten. The source
 Scene and Dialogue are never changed by generation.
+
+Before rendering, the server collects only author-approved references:
+
+- the Character's approved Full Body Asset, falling back to the approved
+  Avatar;
+- the approved reference image of the Outfit selected for that Character in
+  the Shot;
+- the image Assets explicitly approved through the Scene's
+  `reference_asset_ids` endpoint.
+
+Unapproved Draft artwork and images that are merely linked to a Scene are not
+used. Every reference is tied to its Character, Outfit, or Scene Asset ID. The
+shot and its Asset metadata include `reference_usage` with the engine, mode,
+`applied` flag, message, and traceable reference metadata plus a safe
+`file_url`. The binary file bytes are passed to the adapter only when the
+adapter declares reference-image support.
+
+`GET /studio/api/v1/capabilities` exposes
+`image_generation.reference_images`, `reference_mode`, and
+`max_references`. The current SonicBoom/MOSS-Image binding is text-to-image
+only (`reference_images = false`); it does not accept an init image, reference
+image, or a reference list. In that configuration approved references are
+still collected and reported, but the server preserves the text-to-image path
+and never claims that pixels were used. The fake adapter in tests accepts real
+bytevectors and declares `reference_mode = "fake-byte-buffer"` so the plumbing
+can be verified without a GPU.
 
 The endpoint runs synchronously through the same `engine-run-t2i` adapter used
 by the ComfyUI worker, without submitting a queue item or starting a worker.
@@ -899,9 +963,9 @@ The React bundle in `studio-ui/` loads Workplaces, documents, Characters,
 Scenes, and Assets from this API. Character Studio supports concept-first
 creation, AI identity drafts with per-section review/regeneration, independent
 identity saves, Outfit management, artwork Prompt review, single-image
-generation, Avatar/Outfit-reference approval and a Canon view. Drafts are
-visually and structurally separate from Canon, and generated artwork never
-changes identity by itself. Writing continues to autosave with
+generation, Avatar/Full Body/Outfit-reference approval and a Canon view.
+Drafts are visually and structurally separate from Canon, and generated
+artwork never changes identity by itself. Writing continues to autosave with
 `expected_revision`, request inspiration, consume continuation SSE, and insert
 accepted text only after the author approves it.
 
@@ -920,7 +984,12 @@ selection, an explicit **Regenerate Storyboard** action with protected-content
 confirmation, image generation and regeneration, and a return path to the
 Scene. Generated images are loaded from the managed Asset file URL, so
 refreshing the page or restarting the backend restores both the Storyboard and
-its visuals.
+its visuals. The Scene editor also exposes an approved-reference panel for
+linked image Assets, and the Shot editor lets the author choose one Outfit per
+Character. After generation, each Shot shows exactly which approved references
+were selected and whether the adapter actually received image bytes; a
+text-to-image-only engine displays that limitation instead of implying
+image-to-image control.
 
 ## Tests
 
@@ -930,6 +999,7 @@ Run the persistence and HTTP integration suite with the fake engine:
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/persistence.scm
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/storyboard.scm
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/character_studio.scm
+GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/visual_consistency.scm
 ./test/studio/run.sh
 ```
 
@@ -940,7 +1010,8 @@ errors, upload limits, temporary-file cleanup, strict AI storyboard schema
 validation, author-edit/generated-image regeneration protection, explicit
 acknowledgement, Character Studio drafts and locked-Canon handling, Outfit
 default/reference transactions, fake image generation, Avatar approval, and
-links across a restart. When Playwright is installed under `ui/node_modules`,
+Full Body/Scene reference approval, bytevector reference tracing, approved-only
+reference selection, and links across a restart. When Playwright is installed under `ui/node_modules`,
 the same run also drives the bundled `/studio` page through concept-first
 Character creation, draft approval, Outfit creation, fake artwork generation,
 Avatar approval and a browser reload. It never enables SonicBoom or real GPU

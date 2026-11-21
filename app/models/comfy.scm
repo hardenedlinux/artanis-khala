@@ -36,8 +36,10 @@
 (define (comfy-start-worker! config)
   (start-worker! config))
 
-(define (comfy-render-image! config prompt width height seed)
-  (render-image! config prompt #:width width #:height height #:seed seed #:steps 12))
+(define* (comfy-render-image! config prompt width height seed
+                              #:key (references '()))
+  (render-image! config prompt #:width width #:height height #:seed seed
+                 #:steps 12 #:references references))
 
 (define (comfy-next-prompt-number!)
   (set! prompt-counter (+ prompt-counter 1))

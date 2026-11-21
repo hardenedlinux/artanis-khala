@@ -1,5 +1,5 @@
 (define-module (khala engine)
-  #:export (engine-run-t2i engine-sampler-options))
+#:export (engine-run-t2i engine-sampler-options engine-image-capabilities))
 
 (define* (engine-run-t2i params #:key (engine 'fake)
                          (on-progress (lambda args #t))
@@ -10,6 +10,15 @@
                    (else (error "unknown Khala engine" engine))))
          (run (module-ref (resolve-interface module) 'engine-run-t2i)))
     (run params #:on-progress on-progress #:cancelled? cancelled?)))
+
+(define (engine-image-capabilities engine)
+  (let* ((module (case engine
+                   ((fake) '(khala engine fake))
+                   ((sonicboom) '(khala engine sonicboom))
+                   (else (error "unknown Khala engine" engine))))
+         (capabilities
+          (module-ref (resolve-interface module) 'engine-image-capabilities)))
+    (capabilities)))
 
 ;; KSampler COMBO choices per engine: (samplers . schedulers). An engine only
 ;; offers what it really uses, so a chosen value is never silently ignored.

@@ -31,16 +31,21 @@ interface VersionEntry {
 interface Capabilities {
   api_version: number; storage: string; engine: string; default_model: string | null;
   models: { id: string; name: string; size: number }[]; ai_available: boolean;
+  image_generation?: ImageGenerationCapabilities;
+}
+interface ImageGenerationCapabilities {
+  engine: string; available: boolean; reference_images: boolean;
+  reference_mode: string; max_references: number;
 }
 type IdentityKey = "literary_identity" | "visual_identity" | "vocal_identity" | "performance_identity";
 interface StudioCharacter {
   id: string; workplace_id: string; name: string; role: string; summary: string;
-  concept: string; avatar_asset_id: string | null;
+  concept: string; avatar_asset_id: string | null; full_body_asset_id: string | null;
   literary_identity: Record<string, string>;
   visual_identity: Record<string, string>;
   vocal_identity: Record<string, string>;
   performance_identity: Record<string, string>;
-  avatar?: StudioAsset | null;
+  avatar?: StudioAsset | null; full_body?: StudioAsset | null;
   created_at: string; updated_at: string; archived_at: string | null;
 }
 interface CharacterDraft {
@@ -89,6 +94,7 @@ interface StudioScene {
   given_circumstances: SceneGivenCircumstances;
   dramatic_situation: SceneDramaticSituation;
   dialogue: string; direction: SceneDirection; cast_count: number; storyboard_count: number;
+  reference_asset_ids?: string[]; reference_count?: number;
   created_at: string; updated_at: string; deleted_at: string | null;
 }
 interface SceneCastEntry {
@@ -116,12 +122,27 @@ interface StoryboardShot {
   asset_id: string | null; file_url: string | null; status: string;
   source: "ai" | "deterministic" | "manual" | string; model: string;
   author_edited: boolean;
+  character_outfits?: StoryboardCharacterOutfit[];
+  reference_usage?: ReferenceUsage | null;
+}
+interface StoryboardCharacterOutfit { character_id: string; outfit_id: string }
+interface ReferenceTrace {
+  role: "character" | "outfit" | "scene" | string; reference_kind: string;
+  asset_id: string; character_id: string | null; outfit_id: string | null;
+  name: string; mime_type: string; width: number | null; height: number | null;
+  file_url: string; applied: boolean;
+}
+interface ReferenceUsage {
+  engine: string; mode: string; applied: boolean; reference_mode: string;
+  message: string; references: ReferenceTrace[];
 }
 interface SceneStoryboard {
   scene_id: string; shots: StoryboardShot[]; generation_available: boolean;
-  updated_at: string;
+  image_generation?: ImageGenerationCapabilities; updated_at: string;
 }
-interface GeneratedShotImage { shot: StoryboardShot; asset: StudioAsset; }
+interface GeneratedShotImage {
+  shot: StoryboardShot; asset: StudioAsset; reference_usage?: ReferenceUsage;
+}
 type AssetType = "image" | "audio" | "video" | "document" | "other";
 type AssetResourceType = "character" | "scene" | "document";
 interface AssetLink {
@@ -707,6 +728,7 @@ function CharacterOverviewPanel({ character, draft, dirty, saving, onEdit, onSav
         <p className="character-intro">{character.summary || "从一个简单的人物概念开始，逐步建立文学、视觉、声音与表演身份。"}</p>
         <div className="character-quick-facts">
           <div><span>默认服装</span><strong>由 Outfits 管理</strong></div>
+          <div><span>正式立绘</span><strong>{character.full_body_asset_id ? "已确认" : "待确认"}</strong></div>
           <div><span>视觉 Canon</span><strong>{visual.standard_appearance ? "已建立" : "待补充"}</strong></div>
           <div><span>稳定 ID</span><strong>{character.id.slice(0, 8)}</strong></div>
         </div>
@@ -917,6 +939,15 @@ function CharacterArtworkPanel({ workplaceId, character, outfits, artworks, relo
     finally { setBusy(""); }
   }
 
+  async function setFullBody(asset: StudioAsset) {
+    setBusy("full-body"); setError("");
+    try {
+      const updated = await api<StudioCharacter>(`/workplaces/${workplaceId}/characters/${character.id}/full-body`, { method: "POST", body: { asset_id: asset.id } });
+      onCharacterChange(updated); notify("已确认为正式全身立绘");
+    } catch (cause: any) { setError(cause?.message || "无法设置全身立绘"); }
+    finally { setBusy(""); }
+  }
+
   async function setOutfitReference(asset: StudioAsset) {
     if (!outfitId) { setError("请先选择一套服装，再指定参考图。"); return; }
     setBusy("outfit-reference"); setError("");
@@ -933,7 +964,7 @@ function CharacterArtworkPanel({ workplaceId, character, outfits, artworks, relo
     <div className="artwork-workbench">
       <section className="artwork-stage">
         {selected?.file_url ? <img src={selected.file_url} alt={selected.name}/> : <div className="artwork-stage-empty"><Icon name="images"/><h3>还没有生成的视觉作品</h3><p>选择构图类型，组合 Prompt，然后启动一次单张图像生成。</p></div>}
-        {selected && <div className="artwork-stage-caption"><div><small>{artworkTypeOf(selected).toUpperCase()}</small><strong>{selected.name}</strong><span>{selected.width && selected.height ? `${selected.width} × ${selected.height}` : assetMediaMeta(selected)}</span></div><div className="artwork-stage-actions"><button className="quiet-button" disabled={busy !== ""} onClick={() => void setAvatar(selected)}>{character.avatar_asset_id === selected.id ? "已是正式 Avatar" : "设为正式 Avatar"}</button>{selectedOutfit && <button className="quiet-button" disabled={busy !== ""} onClick={() => void setOutfitReference(selected)}>设为「{selectedOutfit.name}」参考图</button>}</div></div>}
+        {selected && <div className="artwork-stage-caption"><div><small>{artworkTypeOf(selected).toUpperCase()}</small><strong>{selected.name}</strong><span>{selected.width && selected.height ? `${selected.width} × ${selected.height}` : assetMediaMeta(selected)}</span></div><div className="artwork-stage-actions"><button className="quiet-button" disabled={busy !== ""} onClick={() => void setAvatar(selected)}>{character.avatar_asset_id === selected.id ? "已是正式 Avatar" : "设为正式 Avatar"}</button><button className="quiet-button" disabled={busy !== ""} onClick={() => void setFullBody(selected)}>{character.full_body_asset_id === selected.id ? "已是正式全身立绘" : "设为正式全身立绘"}</button>{selectedOutfit && <button className="quiet-button" disabled={busy !== ""} onClick={() => void setOutfitReference(selected)}>设为「{selectedOutfit.name}」参考图</button>}</div></div>}
       </section>
       <section className="artwork-controls">
         <div className="artwork-control-row"><label className="identity-field"><span>作品类型</span><small>{ARTWORK_TYPE_INFO[type].hint}</small><select value={type} onChange={(event: any) => { setType(event.target.value); setPrompt(""); }}>{Object.entries(ARTWORK_TYPE_INFO).map(([key, info]) => <option key={key} value={key}>{info.label} · {info.en}</option>)}</select></label><label className="identity-field"><span>服装</span><small>头像与立绘也可使用默认服装。</small><select value={outfitId} onChange={(event: any) => { setOutfitId(event.target.value); setPrompt(""); }}><option value="">不使用服装</option>{outfits.map(outfit => <option key={outfit.id} value={outfit.id}>{outfit.name}{outfit.is_default ? " · 默认" : ""}</option>)}</select></label></div>
@@ -944,7 +975,7 @@ function CharacterArtworkPanel({ workplaceId, character, outfits, artworks, relo
         <p className="artwork-limit-note">当前只生成单张静态图片。图像生成不可用时会明确报错，不会伪造结果。</p>
       </section>
     </div>
-    <section className="artwork-gallery-section"><div className="artwork-gallery-head"><div><div className="eyebrow">ARTWORK ARCHIVE</div><h3>全部视觉作品与参考图</h3></div><span>旧作品永久保留，可随时重新选择。</span></div>{!artworks.length ? <div className="studio-empty-panel compact"><Icon name="images"/><p>生成的第一张作品会出现在这里。</p></div> : <div className="artwork-gallery">{artworks.map(asset => <button key={asset.id} className={`artwork-thumb ${selected?.id === asset.id ? "active" : ""}`} onClick={() => setSelectedId(asset.id)}><AssetPreview asset={asset} compact/><span>{asset.name}</span><small>{artworkTypeOf(asset)}</small>{character.avatar_asset_id === asset.id && <i className="avatar-stamp">AVATAR</i>}</button>)}</div>}</section>
+    <section className="artwork-gallery-section"><div className="artwork-gallery-head"><div><div className="eyebrow">ARTWORK ARCHIVE</div><h3>全部视觉作品与参考图</h3></div><span>只有作者确认的 Avatar、全身立绘与服装参考图会进入 Storyboard 图像生成。</span></div>{!artworks.length ? <div className="studio-empty-panel compact"><Icon name="images"/><p>生成的第一张作品会出现在这里。</p></div> : <div className="artwork-gallery">{artworks.map(asset => <button key={asset.id} className={`artwork-thumb ${selected?.id === asset.id ? "active" : ""}`} onClick={() => setSelectedId(asset.id)}><AssetPreview asset={asset} compact/><span>{asset.name}</span><small>{artworkTypeOf(asset)}</small>{character.avatar_asset_id === asset.id && <i className="avatar-stamp">AVATAR</i>}{character.full_body_asset_id === asset.id && <i className="avatar-stamp full-body-stamp">FULL BODY</i>}</button>)}</div>}</section>
     <AssetLinkPanel workplaceId={workplaceId} resourceType="character" resourceId={character.id} notify={(message) => { notify(message); void reloadArtworks(); }}/>
   </div>;
 }
@@ -955,7 +986,7 @@ function CharacterCanonPanel({ character, outfits, drafts, onTab }: {
 }) {
   return <div className="character-tab-body canon-body">
     <div className="identity-toolbar"><div><div className="eyebrow">AUTHOR APPROVED</div><h3>正式角色设定</h3><p>Canon 只包含作者明确保存或确认的内容。AI 草稿、生成的图片和新视觉特征不会自动进入这里。</p></div><span className="canon-seal">AUTHOR SEAL</span></div>
-    <section className="canon-overview-card"><div className="canon-avatar">{character.avatar?.file_url ? <img src={character.avatar.file_url} alt={character.name}/> : <div className="character-avatar placeholder"><span>{character.name.slice(0, 1)}</span></div>}</div><div><div className="eyebrow">OFFICIAL AVATAR</div><h2>{character.name}</h2><p>{character.summary || "这个人物的正式档案仍在书写。"}</p><small>{character.avatar ? "作者已确认这张图片为正式头像。" : "还没有确认正式头像。"}</small></div><button className="tool-button" onClick={() => onTab("artwork")}>管理视觉作品</button></section>
+    <section className="canon-overview-card"><div className="canon-avatar">{character.avatar?.file_url ? <img src={character.avatar.file_url} alt={character.name}/> : <div className="character-avatar placeholder"><span>{character.name.slice(0, 1)}</span></div>}</div><div><div className="eyebrow">OFFICIAL AVATAR</div><h2>{character.name}</h2><p>{character.summary || "这个人物的正式档案仍在书写。"}</p><small>{character.avatar ? "作者已确认这张图片为正式头像。" : "还没有确认正式头像。"}{character.full_body_asset_id ? " 全身立绘也已确认，将优先用于场景与分镜参考。" : ""}</small></div><button className="tool-button" onClick={() => onTab("artwork")}>管理视觉作品</button></section>
     <div className="canon-columns">
       <section className="canon-identity-list"><div className="canon-section-title"><h3>身份 Canon</h3><button className="quiet-button" onClick={() => onTab("identity")}>编辑身份</button></div>{CHARACTER_SECTIONS.map(section => {
         const identity = character[section.key] || {};
@@ -1282,8 +1313,30 @@ function StoryboardImage({ shot }: { shot: StoryboardShot }) {
   </div>;
 }
 
-function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, onDirtyChange, notify }: {
-  workplace: Workplace; scene: StudioScene; cast: SceneCastDraft[]; board: SceneStoryboard;
+function ShotReferencePanel({ shot, cast, outfitsByCharacter }: {
+  shot: StoryboardShot; cast: SceneCastDraft[];
+  outfitsByCharacter: Record<string, CharacterOutfit[]>;
+}) {
+  const usage = shot.reference_usage;
+  if (!usage) return null;
+  const characterName = (id: string | null) => cast.find(entry => entry.character_id === id)?.character_name || "Character";
+  const outfitName = (characterId: string | null, outfitId: string | null) =>
+    outfitId ? (outfitsByCharacter[characterId || ""] || []).find(outfit => outfit.id === outfitId)?.name || "Outfit" : "";
+  const referenceLabel = (reference: ReferenceTrace) => {
+    if (reference.reference_kind === "scene_reference") return "Scene reference";
+    if (reference.reference_kind === "outfit_reference") return `${characterName(reference.character_id)} · ${outfitName(reference.character_id, reference.outfit_id)}`;
+    return `${characterName(reference.character_id)} · ${reference.reference_kind === "full_body" ? "Full body" : "Avatar"}`;
+  };
+  return <section className="shot-reference-panel">
+    <div className="shot-reference-head"><div><div className="eyebrow">APPROVED REFERENCES</div><h4>本次生成使用的参考图</h4></div><span className={usage.applied ? "reference-applied" : "reference-text-only"}>{usage.applied ? "已传入图像字节" : "仅文本生成"}</span></div>
+    <p>{usage.message}</p>
+    {usage.references.length > 0 && <div className="shot-reference-list">{usage.references.map(reference => <a key={reference.asset_id} className="shot-reference-item" href={reference.file_url} target="_blank" rel="noreferrer"><img src={reference.file_url} alt={reference.name}/><span><strong>{referenceLabel(reference)}</strong><small>{reference.name}</small></span></a>)}</div>}
+  </section>;
+}
+
+function StoryboardWorkspace({ workplace, scene, cast, outfitsByCharacter, board, onChange, onBack, onDirtyChange, notify }: {
+  workplace: Workplace; scene: StudioScene; cast: SceneCastDraft[];
+  outfitsByCharacter: Record<string, CharacterOutfit[]>; board: SceneStoryboard;
   onChange: (board: SceneStoryboard) => void; onBack: () => void;
   onDirtyChange: (dirty: boolean) => void; notify: (message: string) => void;
 }) {
@@ -1331,9 +1384,25 @@ function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, 
       ? shot.character_ids.filter(id => id !== entry.character_id)
       : [...shot.character_ids, entry.character_id];
     const entries = cast.filter(item => characterIds.includes(item.character_id));
+    const existingOutfits = shot.character_outfits || [];
+    const defaultOutfit = (outfitsByCharacter[entry.character_id] || []).find(outfit => outfit.is_default)
+      || (outfitsByCharacter[entry.character_id] || [])[0];
+    const characterOutfits = selected
+      ? existingOutfits.filter(item => item.character_id !== entry.character_id)
+      : defaultOutfit && !existingOutfits.some(item => item.character_id === entry.character_id)
+        ? [...existingOutfits, { character_id: entry.character_id, outfit_id: defaultOutfit.id }]
+        : existingOutfits;
     updateShot(shot.id, {
       character_ids: characterIds,
       characters: entries.map(item => item.character_name),
+      character_outfits: characterOutfits,
+    });
+  }
+
+  function setShotOutfit(shot: StoryboardShot, characterId: string, outfitId: string) {
+    const existing = (shot.character_outfits || []).filter(item => item.character_id !== characterId);
+    updateShot(shot.id, {
+      character_outfits: outfitId ? [...existing, { character_id: characterId, outfit_id: outfitId }] : existing,
     });
   }
 
@@ -1455,6 +1524,7 @@ function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, 
 
     {error && <div className="character-error storyboard-error">{error}<button onClick={() => setError("")}>关闭</button></div>}
     {!board.generation_available && <div className="storyboard-service-warning"><strong>图像服务当前不可用。</strong><span>分镜和 Prompt 仍可完整编辑与保存；生成按钮会保持不可用，不会伪造结果。</span></div>}
+    {board.image_generation && !board.image_generation.reference_images && <div className="storyboard-service-warning"><strong>当前引擎只支持 text-to-image。</strong><span>已批准的 Character、Outfit 与 Scene 参考图会显示在镜头中，但不会伪装成已传给模型。切换到支持参考图的适配器后才会实际使用图像字节。</span></div>}
 
     <div className="storyboard-strip-head">
       <div><div className="eyebrow">THE CONTINUITY BOARD</div><h2>{shots.length} 个镜头</h2></div>
@@ -1470,6 +1540,7 @@ function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, 
         <p className="shot-camera">{shot.camera || "镜头尚未写明"}</p>
         {(shot.expression || shot.performance) && <p className="shot-performance">{[shot.expression, shot.performance].filter(Boolean).join(" · ")}</p>}
         <div className="shot-cast-chips">{shot.characters.length ? shot.characters.map(name => <span key={name}>{name}</span>) : <small>无角色入镜</small>}</div>
+        {shot.reference_usage && <p className="shot-reference-summary">{shot.reference_usage.applied ? `参考图 ${shot.reference_usage.references.length} 张 · 已传入图像字节` : shot.reference_usage.references.length ? `参考图 ${shot.reference_usage.references.length} 张 · 当前仅文本生成` : "本次生成未使用参考图"}</p>}
         <div className="shot-card-actions">
           <button className="quiet-button" onClick={(event: any) => { event.stopPropagation(); setEditingId(shot.id); }}>编辑分镜</button>
           <button className="tool-button primary" disabled={!board.generation_available || !!generatingId || saving || regenerating} onClick={(event: any) => { event.stopPropagation(); void generateImage(shot.id); }}>{generatingId === shot.id ? "正在绘制…" : shot.file_url ? "重新生成" : "Generate Image"}</button>
@@ -1489,7 +1560,14 @@ function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, 
         <label className="field-label">Camera / Composition<textarea rows={2} value={editing.camera} onChange={(event: any) => updateShot(editing.id, { camera: event.target.value })}/></label>
         <label className="field-label">Visual description<textarea rows={3} value={editing.visual_description} onChange={(event: any) => updateShot(editing.id, { visual_description: event.target.value })}/></label>
         <div className="shot-cast-editor"><span className="field-label-title">出场角色</span>{cast.length ? <div className="shot-cast-picker">{cast.map(entry => <label key={entry.character_id} className={editing.character_ids.includes(entry.character_id) ? "chosen" : ""}><input type="checkbox" checked={editing.character_ids.includes(entry.character_id)} onChange={() => toggleCharacter(editing, entry)}/><span>{entry.character_name}</span></label>)}</div> : <p>当前 Scene 没有 Cast。仍可生成无人物入镜的镜头。</p>}</div>
+        {editing.character_ids.length > 0 && <div className="shot-outfit-editor"><span className="field-label-title">本镜头服装</span>{editing.character_ids.map(characterId => {
+          const entry = cast.find(item => item.character_id === characterId);
+          const outfits = outfitsByCharacter[characterId] || [];
+          const selected = (editing.character_outfits || []).find(item => item.character_id === characterId)?.outfit_id || "";
+          return <label key={characterId} className="identity-field"><span>{entry?.character_name || "Character"} · Outfit</span><small>只改变本镜头的服装，不修改 Character Visual Canon。</small><select value={selected} onChange={(event: any) => setShotOutfit(editing, characterId, event.target.value)}><option value="">默认服装 / 不指定</option>{outfits.map(outfit => <option key={outfit.id} value={outfit.id}>{outfit.name}{outfit.is_default ? " · 默认" : ""}{outfit.reference_asset_id ? " · 有正式参考图" : ""}</option>)}</select></label>;
+        })}</div>}
         <label className="field-label shot-prompt-field">Image generation prompt<textarea rows={10} value={editing.image_prompt} onChange={(event: any) => updateShot(editing.id, { image_prompt: event.target.value })}/><small>Prompt 已从场景、Cast、Visual Canon 和参考 Assets 组合。可编辑，但不要把未获作者批准的永久外观变化写成 Canon。</small></label>
+        <ShotReferencePanel shot={editing} cast={cast} outfitsByCharacter={outfitsByCharacter}/>
         <div className="shot-editor-generate"><button className="tool-button primary" disabled={!board.generation_available || !!generatingId || saving || regenerating} onClick={() => void generateImage(editing.id)}>{generatingId === editing.id ? "正在绘制…" : editing.file_url ? "重新生成这一格" : "Generate Image"}</button><span>{editing.file_url ? "新画面会作为新的 Asset 保存，旧画面仍保留。" : "只有明确点击才会生成。修改会先保存，生成不会自动改写分镜或 Character Canon。"}</span></div>
       </div>
     </Modal>}
@@ -1512,6 +1590,7 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
   const [storyboardOpen, setStoryboardOpen] = React.useState(false);
   const [storyboardLoading, setStoryboardLoading] = React.useState(false);
   const [storyboardDirty, setStoryboardDirty] = React.useState(false);
+  const [characterOutfits, setCharacterOutfits] = React.useState<Record<string, CharacterOutfit[]>>({});
   const [error, setError] = React.useState("");
   const [modal, setModal] = React.useState<"create" | "delete" | null>(null);
   const [newTitle, setNewTitle] = React.useState("");
@@ -1526,7 +1605,20 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
     setStoryboard(null);
     setStoryboardOpen(false);
     setStoryboardDirty(false);
+    setCharacterOutfits({});
     setError("");
+  }
+
+  async function loadCharacterOutfits(entries: SceneCastDraft[]) {
+    const results = await Promise.all(entries.map(async entry => {
+      try {
+        const outfits = await api<CharacterOutfit[]>(`/workplaces/${workplace.id}/characters/${entry.character_id}/outfits`);
+        return [entry.character_id, outfits] as [string, CharacterOutfit[]];
+      } catch {
+        return [entry.character_id, []] as [string, CharacterOutfit[]];
+      }
+    }));
+    setCharacterOutfits(Object.fromEntries(results));
   }
 
   async function openScene(sceneId: string, confirmLeave = true) {
@@ -1725,6 +1817,7 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
         const entries = await saveCast();
         if (!entries) return;
       }
+      await loadCharacterOutfits(cast);
       const loaded = await api<SceneStoryboard>(
         `/workplaces/${workplace.id}/scenes/${active.id}/storyboard`,
         create ? { method: "POST", body: {} } : {},
@@ -1817,6 +1910,7 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
       <section className="scene-section"><div className="scene-section-head"><div className="eyebrow">DRAMATIC SITUATION</div><h3>戏剧情境</h3><p>把空间里的压力说清楚，而不是罗列事件。</p></div><div className="scene-field-grid">{SCENE_DRAMATIC_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={draft.dramatic_situation[field.key]} onChange={(event: any) => editDramatic(field.key, event.target.value)}/></label>)}</div></section>
       {renderCastEditor()}
       <AssetLinkPanel workplaceId={workplace.id} resourceType="scene" resourceId={active.id} notify={notify}/>
+      <SceneReferencePanel workplaceId={workplace.id} scene={active} notify={notify} onChange={(updated) => { setActive(updated); setScenes(previous => previous.map(item => item.id === updated.id ? updated : item)); }}/>
       <section className="scene-section"><div className="scene-section-head"><div><div className="eyebrow">DIALOGUE</div><h3>台词与叙事</h3><p>写下对白、潜台词与必要的叙事内容。Markdown 会作为连续文本保存。</p></div></div><textarea className="scene-manuscript" rows={12} value={draft.dialogue} onChange={(event: any) => editScene(previous => ({ ...previous, dialogue: event.target.value }))} placeholder="MARA&#10;你回来，是为了地图，还是为了那盏灯？&#10;&#10;（IL YAN 没有回答。他把钥匙放回桌上。）"/></section>
       <section className="scene-section"><div className="scene-section-head"><div className="eyebrow">DIRECTION</div><h3>调度与镜头</h3><p>动作、空间、表演与未来影像的镜头建议。</p></div><div className="scene-field-grid">{SCENE_DIRECTION_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={draft.direction[field.key]} onChange={(event: any) => editDirection(field.key, event.target.value)}/></label>)}</div></section>
       <div className="scene-save-footer"><span>场景与 Cast 分开保存。Cast 使用一次事务替换，失败时不会留下部分更新。</span><button className="tool-button primary" disabled={savingScene || !sceneDirty} onClick={() => void saveScene()}>{savingScene ? "保存中…" : "保存场景"}</button></div>
@@ -1827,7 +1921,7 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
     <div className="book-topline"><div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace.title}</span><span className="top-separator">/</span><span className="document-crumb">SCENES &amp; CASTING</span></div><div className="book-actions"><span className="character-count">{scenes.length} 个场景</span><button className="head-btn" onClick={() => { if ((!sceneDirty && !castDirty && !storyboardDirty) || window.confirm("当前场景还有未保存修改，建立新场景会放弃它们。继续吗？")) setModal("create"); }}><Icon name="plus"/>新建场景</button></div></div>
     <div className="scene-workspace">
       <aside className="scene-index"><div className="character-index-head"><div className="eyebrow brass-text">THE STAGE BOOK</div><h1>场景与 Casting</h1><p>把人物放进具体情境，看他们如何行动、碰撞和改变。</p></div>{error && <div className="character-error">{error}<button onClick={() => setError("")}>关闭</button></div>}{renderSceneList()}</aside>
-      <main className="scene-detail">{storyboardOpen && storyboard && active ? <StoryboardWorkspace workplace={workplace} scene={active} cast={cast} board={storyboard} onChange={(next) => { setStoryboard(next); setActive(previous => previous ? { ...previous, storyboard_count: next.shots.length } : previous); setScenes(previous => previous.map(scene => scene.id === active.id ? { ...scene, storyboard_count: next.shots.length } : scene)); }} onBack={() => { setStoryboardOpen(false); setStoryboardDirty(false); }} onDirtyChange={setStoryboardDirty} notify={notify}/> : storyboardLoading ? <div className="character-state scene-detail-state"><span className="thinking-mark">✦</span><p>正在从场景与角色档案整理分镜……</p></div> : renderSceneDetail()}</main>
+      <main className="scene-detail">{storyboardOpen && storyboard && active ? <StoryboardWorkspace workplace={workplace} scene={active} cast={cast} outfitsByCharacter={characterOutfits} board={storyboard} onChange={(next) => { setStoryboard(next); setActive(previous => previous ? { ...previous, storyboard_count: next.shots.length } : previous); setScenes(previous => previous.map(scene => scene.id === active.id ? { ...scene, storyboard_count: next.shots.length } : scene)); }} onBack={() => { setStoryboardOpen(false); setStoryboardDirty(false); }} onDirtyChange={setStoryboardDirty} notify={notify}/> : storyboardLoading ? <div className="character-state scene-detail-state"><span className="thinking-mark">✦</span><p>正在从场景与角色档案整理分镜……</p></div> : renderSceneDetail()}</main>
     </div>
     {modal === "create" && <Modal title="建立新场景" eyebrow="A MOMENT ON STAGE" onClose={() => { setModal(null); setError(""); }} actions={<><button className="quiet-button" onClick={() => setModal(null)}>取消</button><button className="confirm-button" disabled={!newTitle.trim() || savingScene} onClick={() => void createScene()}>{savingScene ? "创建中…" : "建立场景"}</button></>}>
       <p className="modal-intro">先给这个具体时刻一个名字。既定情境、Cast、台词和调度都可以之后逐步补全。</p>
@@ -1929,6 +2023,56 @@ function AssetTargetsEditor({ workplaceId, asset, onChange, notify }: {
       </div>)}</div>}
       <div className="asset-link-add"><select value={selection} onChange={(event: any) => setSelection(event.target.value)} disabled={busy || !options.length}><option value="">选择要关联的 Character、Scene 或 Document</option>{options.map(option => <option key={`${option.type}:${option.id}`} value={`${option.type}:${option.id}`}>{ASSET_RESOURCE_INFO[option.type].label} · {option.name}</option>)}</select><button className="tool-button" disabled={!selection || busy} onClick={() => void addLink()}><Icon name="link"/>{busy ? "更新中…" : "建立关联"}</button></div>
     </>}
+  </section>;
+}
+
+function SceneReferencePanel({ workplaceId, scene, onChange, notify }: {
+  workplaceId: string; scene: StudioScene;
+  onChange: (scene: StudioScene) => void; notify: (message: string) => void;
+}) {
+  const [assets, setAssets] = React.useState<StudioAsset[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const selected = new Set(scene.reference_asset_ids || []);
+
+  async function loadAssets() {
+    setLoading(true); setError("");
+    try {
+      const list = await api<StudioAsset[]>(`/workplaces/${workplaceId}/scenes/${scene.id}/assets`);
+      setAssets(list.filter(asset => asset.asset_type === "image" && asset.file_url));
+    } catch (cause: any) {
+      setError(cause?.message || "无法读取场景已关联图片");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  React.useEffect(() => { void loadAssets(); }, [workplaceId, scene.id]);
+
+  async function toggle(asset: StudioAsset) {
+    if (busy) return;
+    const ids = selected.has(asset.id)
+      ? (scene.reference_asset_ids || []).filter(id => id !== asset.id)
+      : [...(scene.reference_asset_ids || []), asset.id];
+    setBusy(true); setError("");
+    try {
+      const updated = await api<StudioScene>(`/workplaces/${workplaceId}/scenes/${scene.id}/references`, {
+        method: "PUT", body: { asset_ids: ids },
+      });
+      onChange(updated);
+      notify(selected.has(asset.id) ? "已取消场景参考图" : "已确认为场景参考图");
+    } catch (cause: any) {
+      setError(cause?.message || "无法更新场景参考图");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className="scene-section scene-reference-section">
+    <div className="scene-section-head"><div><div className="eyebrow">APPROVED SCENE REFERENCES</div><h3>场景参考图</h3><p>只有这里勾选的图片会进入分镜图像生成。Character 与 Outfit 的正式参考图由各自模块确认。</p></div><button className="quiet-button" disabled={loading || busy} onClick={() => void loadAssets()}>{loading ? "读取中…" : "刷新已关联图片"}</button></div>
+    {error && <p className="form-error">{error}</p>}
+    {loading ? <div className="asset-inline-state">正在读取已关联图片……</div> : !assets.length ? <div className="asset-inline-empty">尚未关联任何图片。请先在上方「关联对象」或资源库中把图片关联到本场景，再回到这里确认。</div> : <div className="scene-reference-grid">{assets.map(asset => <button key={asset.id} className={`scene-reference-card ${selected.has(asset.id) ? "chosen" : ""}`} disabled={busy} onClick={() => void toggle(asset)}><AssetPreview asset={asset} compact/><span><strong>{asset.name}</strong><small>{selected.has(asset.id) ? "已批准为场景参考" : "点击批准"}</small></span>{selected.has(asset.id) && <i>✓</i>}</button>)}</div>}
   </section>;
 }
 

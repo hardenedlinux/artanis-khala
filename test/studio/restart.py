@@ -47,6 +47,9 @@ assert studio_character["visual_identity"]["face"] == (
 ), studio_character
 assert studio_character["visual_identity"]["standard_appearance"], studio_character
 assert studio_character["avatar_asset_id"] == expected["studio_avatar_asset_id"], studio_character
+assert studio_character["full_body_asset_id"] == (
+    expected["studio_full_body_asset_id"]
+), studio_character
 print("ok studio-character-studio-survives-restart")
 
 with opener.open(studio_character_url + "/outfits", timeout=10) as response:
@@ -66,7 +69,9 @@ with opener.open(studio_character_url + "/artworks", timeout=10) as response:
 assert {
     asset["id"] for asset in character_artworks
 } == {
-    expected["studio_avatar_asset_id"], expected["studio_outfit_asset_id"]
+    expected["studio_avatar_asset_id"],
+    expected["studio_outfit_asset_id"],
+    expected["studio_full_body_asset_id"],
 }, character_artworks
 print("ok studio-character-artworks-survive-restart")
 
@@ -82,6 +87,9 @@ with opener.open(studio_character_url + "/canon", timeout=10) as response:
     character_canon = json.loads(response.read())["data"]
 
 assert character_canon["avatar"]["id"] == expected["studio_avatar_asset_id"], character_canon
+assert character_canon["full_body"]["id"] == (
+    expected["studio_full_body_asset_id"]
+), character_canon
 print("ok studio-character-canon-survives-restart")
 
 with opener.open(
@@ -103,6 +111,7 @@ assert scene["title"] == "The Drowned District", scene
 assert scene["status"] == "ready", scene
 assert scene["given_circumstances"]["place"] == "The northern harbor", scene
 assert scene["dramatic_situation"]["turn"] == "The lamp is still warm.", scene
+assert scene["reference_asset_ids"] == [expected["scene_reference_asset_id"]], scene
 print("ok studio-scene-survives-restart")
 
 cast_url = scene_url + "/cast"
@@ -125,6 +134,10 @@ shot = next(
 assert shot["status"] == "generated", shot
 assert shot["asset_id"] == expected["storyboard_asset_id"], shot
 assert shot["file_url"], shot
+assert shot["reference_usage"]["applied"] is True, shot
+assert [
+    entry["asset_id"] for entry in shot["reference_usage"]["references"]
+] == [expected["scene_reference_asset_id"]], shot
 print("ok studio-storyboard-survives-restart")
 
 with opener.open(

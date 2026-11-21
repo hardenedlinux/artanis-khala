@@ -76,6 +76,11 @@ def check(name, condition):
 capabilities = json_request("GET", "/studio/api/v1/capabilities")
 check("capabilities", capabilities["api_version"] == 1 and capabilities["ai_available"])
 check("fake-model", any(item["id"] == "fake" for item in capabilities["models"]))
+check(
+    "fake-image-reference-capability",
+    capabilities["image_generation"]["reference_images"] is True
+    and capabilities["image_generation"]["reference_mode"] == "fake-byte-buffer",
+)
 
 status, page, _ = request("GET", "/studio")
 check(
@@ -355,10 +360,29 @@ check(
     "character-outfit-reference-approved",
     referenced["reference_asset_id"] == second_artwork["asset"]["id"],
 )
+full_body_artwork = json_request(
+    "POST",
+    f"{studio_base}/artworks/generate",
+    {"artwork_type": "full_body", "prompt": prompt_result["prompt"]},
+    201,
+)
+full_body_character = json_request(
+    "POST",
+    f"{studio_base}/full-body",
+    {"asset_id": full_body_artwork["asset"]["id"]},
+)
+check(
+    "character-full-body-approved",
+    full_body_character["full_body_asset_id"]
+    == full_body_artwork["asset"]["id"]
+    and full_body_character["full_body"]["id"]
+    == full_body_artwork["asset"]["id"],
+)
 canon = json_request("GET", f"{studio_base}/canon")
 check(
     "character-canon-view",
     canon["avatar"]["id"] == first_artwork["asset"]["id"]
+    and canon["full_body"]["id"] == full_body_artwork["asset"]["id"]
     and canon["character"]["visual_identity"]["face"]
     == "A locked angular face with a burn scar.",
 )
@@ -1017,6 +1041,47 @@ for resource_type, resource_path, resource_id in (
         any(item["id"] == asset_id for item in linked_assets),
     )
 
+scene_with_references = json_request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/references",
+    {"asset_ids": [asset_id]},
+)
+check(
+    "scene-references-approved",
+    scene_with_references["reference_asset_ids"] == [asset_id]
+    and scene_with_references["reference_count"] == 1,
+)
+status, body, _ = request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/references",
+    {"asset_ids": [second_artwork["asset"]["id"]]},
+)
+check(
+    "scene-reference-must-be-linked",
+    status == 422 and json.loads(body)["error"]["code"] == "ASSET_NOT_LINKED",
+)
+referenced_generation = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard/shots/{shot_id}/image",
+)
+reference_trace = referenced_generation["reference_usage"]
+check(
+    "storyboard-reference-usage-recorded",
+    reference_trace["applied"] is True
+    and reference_trace["mode"] == "reference-conditioned"
+    and [entry["asset_id"] for entry in reference_trace["references"]]
+    == [asset_id],
+)
+referenced_scene = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}"
+)
+check(
+    "scene-reference-unchanged-by-generation",
+    referenced_scene["reference_asset_ids"] == [asset_id]
+    and referenced_scene["dramatic_situation"]["turn"]
+    == "The lamp is still warm.",
+)
+
 status, body, _ = request(
     "POST",
     f"{assets_path}/{asset_id}/links",
@@ -1279,10 +1344,12 @@ if STATE_PATH:
                 "studio_outfit_id": first_outfit["id"],
                 "studio_avatar_asset_id": first_artwork["asset"]["id"],
                 "studio_outfit_asset_id": second_artwork["asset"]["id"],
+                "studio_full_body_asset_id": full_body_artwork["asset"]["id"],
                 "scene_id": scene_id,
+                "scene_reference_asset_id": asset_id,
                 "document_id": document_id,
                 "asset_id": asset_id,
-                "storyboard_asset_id": regenerated["shot"]["asset_id"],
+                "storyboard_asset_id": referenced_generation["shot"]["asset_id"],
                 "storyboard_shot_id": shot_id,
                 "asset_checksum": asset["checksum"],
                 "revision": unchanged["revision"],
