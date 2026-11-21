@@ -80,10 +80,13 @@ interface SceneDraft {
   dialogue: string; direction: SceneDirection;
 }
 interface StoryboardShot {
-  id: string; number: number; content: string; character_ids: string[];
-  characters: string[]; camera: string; expression_action: string;
-  visual_description: string; image_prompt: string; asset_id: string | null;
-  file_url: string | null; status: string;
+  id: string; number: number; dramatic_beat: string; action: string;
+  content: string; character_ids: string[]; characters: string[];
+  camera: string; expression: string; performance: string;
+  expression_action: string; visual_description: string; image_prompt: string;
+  asset_id: string | null; file_url: string | null; status: string;
+  source: "ai" | "deterministic" | "manual" | string; model: string;
+  author_edited: boolean;
 }
 interface SceneStoryboard {
   scene_id: string; shots: StoryboardShot[]; generation_available: boolean;
@@ -863,6 +866,7 @@ function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, 
   const [shots, setShots] = React.useState<StoryboardShot[]>(board.shots);
   const [dirty, setDirty] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const [regenerating, setRegenerating] = React.useState(false);
   const [generatingId, setGeneratingId] = React.useState("");
   const [editingId, setEditingId] = React.useState("");
   const [error, setError] = React.useState("");
@@ -877,6 +881,24 @@ function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, 
 
   function updateShot(id: string, patch: Partial<StoryboardShot>) {
     markDirty(shots.map(shot => shot.id === id ? { ...shot, ...patch } : shot));
+  }
+
+  function updateAction(shot: StoryboardShot, action: string) {
+    updateShot(shot.id, { action, content: action });
+  }
+
+  function updateExpression(shot: StoryboardShot, expression: string) {
+    updateShot(shot.id, {
+      expression,
+      expression_action: [expression, shot.performance].filter(Boolean).join("\n\n"),
+    });
+  }
+
+  function updatePerformance(shot: StoryboardShot, performance: string) {
+    updateShot(shot.id, {
+      performance,
+      expression_action: [shot.expression, performance].filter(Boolean).join("\n\n"),
+    });
   }
 
   function toggleCharacter(shot: StoryboardShot, entry: SceneCastDraft) {
@@ -912,8 +934,52 @@ function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, 
     }
   }
 
+  async function regenerateStoryboard() {
+    if (regenerating || saving || generatingId) return;
+    if (dirty && !window.confirm("重新生成会替换当前分镜。未保存的分镜修改会丢失，继续吗？")) return;
+    const protectedCount = shots.filter(shot =>
+      shot.author_edited || !!shot.asset_id || shot.status === "generated"
+    ).length;
+    if (protectedCount && !window.confirm(
+      `当前有 ${protectedCount} 个镜头已被编辑或生成过画面。重新生成会产生新的草稿镜头，旧图片 Asset 仍会保留。继续吗？`
+    )) return;
+    setRegenerating(true); setError("");
+    const requestBoard = async (acknowledge: boolean) => api<SceneStoryboard>(
+      `/workplaces/${workplace.id}/scenes/${scene.id}/storyboard`,
+      {
+        method: "POST",
+        body: {
+          force: true,
+          acknowledge_protected: acknowledge,
+        },
+      },
+    );
+    try {
+      let saved: SceneStoryboard;
+      try {
+        saved = await requestBoard(protectedCount > 0);
+      } catch (cause: any) {
+        if (!(cause instanceof StudioApiError)
+            || cause.status !== 422 || cause.code !== "STORYBOARD_PROTECTED") throw cause;
+        if (!window.confirm("服务器检测到受保护的分镜内容。确认用新的草稿替换当前分镜吗？旧图片仍会保留。")) return;
+        saved = await requestBoard(true);
+      }
+      setShots(saved.shots);
+      setDirty(false);
+      setEditingId("");
+      onChange(saved);
+      notify(saved.shots.some(shot => shot.source === "ai")
+        ? "AI 分镜草稿已生成，请逐格审阅、编辑并保存"
+        : "分镜模板已重新生成");
+    } catch (cause: any) {
+      setError(cause?.message || "重新生成分镜失败。当前分镜没有被覆盖。");
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
   async function generateImage(shotId: string) {
-    if (generatingId || saving) return;
+    if (generatingId || saving || regenerating) return;
     setError("");
     let latest = shots;
     if (dirty) {
@@ -953,11 +1019,12 @@ function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, 
         <button className="storyboard-back" onClick={leave}>← 返回 Scene</button>
         <div className="eyebrow brass-text">STORYBOARD · {scene.title}</div>
         <h1>把这一场戏变成镜头。</h1>
-        <p>既定情境、Cast 的目标与 Visual Canon 已经自动收进每一格。你只需要决定画面，而不是重新填写资料。</p>
+        <p>既定情境、Cast 的目标与 Visual Canon 已经自动收进每一格。镜头数量与戏剧推进由场景内容决定；生成结果只是可编辑草稿。</p>
       </div>
       <div className="storyboard-head-actions">
         <span className={dirty ? "scene-dirty" : ""}>{dirty ? "分镜有未保存修改" : `${generatedCount} / ${shots.length} 格已有画面`}</span>
-        <button className="tool-button primary" disabled={saving || !dirty} onClick={() => void persistShots()}>{saving ? "保存中…" : "保存分镜"}</button>
+        <button className="head-btn" disabled={regenerating || saving || !!generatingId} onClick={() => void regenerateStoryboard()}>{regenerating ? "正在生成分镜…" : "Regenerate Storyboard"}</button>
+        <button className="tool-button primary" disabled={saving || regenerating || !dirty} onClick={() => void persistShots()}>{saving ? "保存中…" : "保存分镜"}</button>
         <button className="head-btn" onClick={leave}>返回 Scene</button>
       </div>
     </div>
@@ -973,29 +1040,33 @@ function StoryboardWorkspace({ workplace, scene, cast, board, onChange, onBack, 
     <div className="storyboard-grid">{shots.map(shot => <article key={shot.id} className={`shot-card ${shot.file_url ? "has-image" : ""} ${generatingId === shot.id ? "generating" : ""}`} role="button" tabIndex={0} onClick={() => setEditingId(shot.id)} onKeyDown={(event: any) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setEditingId(shot.id); } }}>
       <StoryboardImage shot={shot}/>
       <div className="shot-card-body">
-        <div className="shot-card-topline"><span>SHOT {String(shot.number).padStart(2, "0")}</span><em className={shot.file_url ? "ready" : ""}>{generatingId === shot.id ? "正在生成…" : shot.file_url ? "已有画面" : "待生成"}</em></div>
-        <h3>{shot.content || "这一格还没有动作描述"}</h3>
+        <div className="shot-card-topline"><span>SHOT {String(shot.number).padStart(2, "0")} · {shot.source === "ai" ? "AI DRAFT" : shot.source === "manual" ? "AUTHOR" : "TEMPLATE"}</span><em className={shot.file_url ? "ready" : ""}>{generatingId === shot.id ? "正在生成…" : shot.file_url ? "已有画面" : "待生成"}</em></div>
+        {shot.dramatic_beat && <p className="shot-beat"><strong>BEAT</strong>{shot.dramatic_beat}</p>}
+        <h3>{shot.action || shot.content || "这一格还没有动作描述"}</h3>
         <p className="shot-camera">{shot.camera || "镜头尚未写明"}</p>
+        {(shot.expression || shot.performance) && <p className="shot-performance">{[shot.expression, shot.performance].filter(Boolean).join(" · ")}</p>}
         <div className="shot-cast-chips">{shot.characters.length ? shot.characters.map(name => <span key={name}>{name}</span>) : <small>无角色入镜</small>}</div>
         <div className="shot-card-actions">
           <button className="quiet-button" onClick={(event: any) => { event.stopPropagation(); setEditingId(shot.id); }}>编辑分镜</button>
-          <button className="tool-button primary" disabled={!board.generation_available || !!generatingId || saving} onClick={(event: any) => { event.stopPropagation(); void generateImage(shot.id); }}>{generatingId === shot.id ? "正在绘制…" : shot.file_url ? "重新生成" : "Generate Image"}</button>
+          <button className="tool-button primary" disabled={!board.generation_available || !!generatingId || saving || regenerating} onClick={(event: any) => { event.stopPropagation(); void generateImage(shot.id); }}>{generatingId === shot.id ? "正在绘制…" : shot.file_url ? "重新生成" : "Generate Image"}</button>
         </div>
       </div>
     </article>)}</div>
 
-    <div className="storyboard-footer"><span>每个镜头都保存独立的 Prompt 与 Asset ID。重新生成不会覆盖旧 Asset。</span><button className="tool-button primary" disabled={saving || !dirty} onClick={() => void persistShots()}>{saving ? "保存中…" : "保存分镜"}</button></div>
+    <div className="storyboard-footer"><span>每个镜头都保存独立的 Prompt 与 Asset ID。重新生成不会覆盖旧 Asset；受保护的作者编辑需要明确确认。</span><button className="tool-button primary" disabled={saving || regenerating || !dirty} onClick={() => void persistShots()}>{saving ? "保存中…" : "保存分镜"}</button></div>
 
     {editing && <Modal title={`Shot ${String(editing.number).padStart(2, "0")}`} eyebrow="EDIT THE FRAME" onClose={() => setEditingId("")} className="shot-editor-modal" actions={<><button className="quiet-button" onClick={() => setEditingId("")}>关闭</button><button className="confirm-button" disabled={saving} onClick={() => void persistShots()}>{saving ? "保存中…" : "保存分镜"}</button></>}>
       <div className="shot-editor">
         <div className="shot-editor-image"><StoryboardImage shot={editing}/></div>
-        <label className="field-label">场景内容与动作<textarea rows={3} value={editing.content} onChange={(event: any) => updateShot(editing.id, { content: event.target.value })}/></label>
+        <label className="field-label">Dramatic Beat<textarea rows={2} value={editing.dramatic_beat} onChange={(event: any) => updateShot(editing.id, { dramatic_beat: event.target.value })}/><small>这一格推进了什么戏剧变化。</small></label>
+        <label className="field-label">Action<textarea rows={3} value={editing.action || editing.content} onChange={(event: any) => updateAction(editing, event.target.value)}/><small>正在发生什么，角色如何行动与反应。</small></label>
+        <label className="field-label">Expression<textarea rows={2} value={editing.expression} onChange={(event: any) => updateExpression(editing, event.target.value)}/><small>可见的情绪、表情与面部行为。</small></label>
+        <label className="field-label">Performance<textarea rows={2} value={editing.performance} onChange={(event: any) => updatePerformance(editing, event.target.value)}/><small>姿态、手势、动作节奏与表演细节。</small></label>
         <label className="field-label">Camera / Composition<textarea rows={2} value={editing.camera} onChange={(event: any) => updateShot(editing.id, { camera: event.target.value })}/></label>
-        <label className="field-label">Character expression and action<textarea rows={2} value={editing.expression_action} onChange={(event: any) => updateShot(editing.id, { expression_action: event.target.value })}/></label>
         <label className="field-label">Visual description<textarea rows={3} value={editing.visual_description} onChange={(event: any) => updateShot(editing.id, { visual_description: event.target.value })}/></label>
         <div className="shot-cast-editor"><span className="field-label-title">出场角色</span>{cast.length ? <div className="shot-cast-picker">{cast.map(entry => <label key={entry.character_id} className={editing.character_ids.includes(entry.character_id) ? "chosen" : ""}><input type="checkbox" checked={editing.character_ids.includes(entry.character_id)} onChange={() => toggleCharacter(editing, entry)}/><span>{entry.character_name}</span></label>)}</div> : <p>当前 Scene 没有 Cast。仍可生成无人物入镜的镜头。</p>}</div>
         <label className="field-label shot-prompt-field">Image generation prompt<textarea rows={10} value={editing.image_prompt} onChange={(event: any) => updateShot(editing.id, { image_prompt: event.target.value })}/><small>Prompt 已从场景、Cast、Visual Canon 和参考 Assets 组合。可编辑，但不要把未获作者批准的永久外观变化写成 Canon。</small></label>
-        <div className="shot-editor-generate"><button className="tool-button primary" disabled={!board.generation_available || !!generatingId || saving} onClick={() => void generateImage(editing.id)}>{generatingId === editing.id ? "正在绘制…" : editing.file_url ? "重新生成这一格" : "Generate Image"}</button><span>{editing.file_url ? "新画面会作为新的 Asset 保存，旧画面仍保留。" : "生成结果会自动关联到当前 Scene。"}</span></div>
+        <div className="shot-editor-generate"><button className="tool-button primary" disabled={!board.generation_available || !!generatingId || saving || regenerating} onClick={() => void generateImage(editing.id)}>{generatingId === editing.id ? "正在绘制…" : editing.file_url ? "重新生成这一格" : "Generate Image"}</button><span>{editing.file_url ? "新画面会作为新的 Asset 保存，旧画面仍保留。" : "只有明确点击才会生成。修改会先保存，生成不会自动改写分镜或 Character Canon。"}</span></div>
       </div>
     </Modal>}
   </div>;
@@ -1332,7 +1403,7 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
     <div className="book-topline"><div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace.title}</span><span className="top-separator">/</span><span className="document-crumb">SCENES &amp; CASTING</span></div><div className="book-actions"><span className="character-count">{scenes.length} 个场景</span><button className="head-btn" onClick={() => { if ((!sceneDirty && !castDirty && !storyboardDirty) || window.confirm("当前场景还有未保存修改，建立新场景会放弃它们。继续吗？")) setModal("create"); }}><Icon name="plus"/>新建场景</button></div></div>
     <div className="scene-workspace">
       <aside className="scene-index"><div className="character-index-head"><div className="eyebrow brass-text">THE STAGE BOOK</div><h1>场景与 Casting</h1><p>把人物放进具体情境，看他们如何行动、碰撞和改变。</p></div>{error && <div className="character-error">{error}<button onClick={() => setError("")}>关闭</button></div>}{renderSceneList()}</aside>
-      <main className="scene-detail">{storyboardOpen && storyboard && active ? <StoryboardWorkspace workplace={workplace} scene={active} cast={cast} board={storyboard} onChange={setStoryboard} onBack={() => { setStoryboardOpen(false); setStoryboardDirty(false); }} onDirtyChange={setStoryboardDirty} notify={notify}/> : storyboardLoading ? <div className="character-state scene-detail-state"><span className="thinking-mark">✦</span><p>正在从场景与角色档案整理分镜……</p></div> : renderSceneDetail()}</main>
+      <main className="scene-detail">{storyboardOpen && storyboard && active ? <StoryboardWorkspace workplace={workplace} scene={active} cast={cast} board={storyboard} onChange={(next) => { setStoryboard(next); setActive(previous => previous ? { ...previous, storyboard_count: next.shots.length } : previous); setScenes(previous => previous.map(scene => scene.id === active.id ? { ...scene, storyboard_count: next.shots.length } : scene)); }} onBack={() => { setStoryboardOpen(false); setStoryboardDirty(false); }} onDirtyChange={setStoryboardDirty} notify={notify}/> : storyboardLoading ? <div className="character-state scene-detail-state"><span className="thinking-mark">✦</span><p>正在从场景与角色档案整理分镜……</p></div> : renderSceneDetail()}</main>
     </div>
     {modal === "create" && <Modal title="建立新场景" eyebrow="A MOMENT ON STAGE" onClose={() => { setModal(null); setError(""); }} actions={<><button className="quiet-button" onClick={() => setModal(null)}>取消</button><button className="confirm-button" disabled={!newTitle.trim() || savingScene} onClick={() => void createScene()}>{savingScene ? "创建中…" : "建立场景"}</button></>}>
       <p className="modal-intro">先给这个具体时刻一个名字。既定情境、Cast、台词和调度都可以之后逐步补全。</p>

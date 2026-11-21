@@ -56,6 +56,9 @@ if ! command -v art >/dev/null 2>&1; then
   exit 1
 fi
 
+GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$root/lib:$root" \
+  guile "$root/test/studio/storyboard.scm"
+
 start_server
 KHALA_STUDIO_TEST_PORT="$port" KHALA_STUDIO_STATE="$state" \
   KHALA_STUDIO_TEST_ASSETS_DIR="$run_dir/studio-assets" \

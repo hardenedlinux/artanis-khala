@@ -334,10 +334,28 @@ validation or insert fails, the previous cast remains intact.
 ## Storyboard and Visual Output
 
 A Storyboard belongs to one Scene. Creating it collects the Scene's Given
-Circumstances, Dramatic Situation, Cast objectives/actions/emotional states,
-Character Visual Canon, and linked Scene/Character Asset names. It produces
-four editable shots; the author does not re-enter information already stored in
-the Scene, Cast, or Character resources.
+Circumstances, Dramatic Situation, Cast objectives/actions/conflicts/emotional
+states/subtext, each Character's Literary, Visual and Performance Identity, and
+the text metadata of linked Scene/Character Assets. The author does not re-enter
+information already stored in those resources.
+
+With the configured `sonicboom` text engine, the Storyboard prompt in
+`conf/studio-prompts/storyboard.md` asks the existing `engine-chat` adapter to
+choose the shot count and dramatic progression from the Scene. Its reply must
+be one JSON object with exactly a `shots` array; every shot must contain exactly
+`dramatic_beat`, `action`, `character_ids`, `expression`, `performance`,
+`camera`, `visual_description`, and `image_prompt`. The server validates the
+whole schema before saving. Invalid JSON, missing/extra fields, unknown
+Character IDs, duplicate cast entries, an empty board, or more than eight shots
+return HTTP `502` `INVALID_STORYBOARD_OUTPUT`; the existing Storyboard is left
+untouched. Character IDs must come from the current Scene Cast. The server
+derives Character names and appends an authoritative Visual Canon block to
+every image prompt, so the model cannot silently replace permanent appearance.
+
+With `engine = fake`, creation keeps the deterministic four-shot template used
+by tests and demos. This is also the fallback used by the test suite, which
+never starts SonicBoom. Asset text metadata is supplied to the model, but no
+pixel-level visual understanding is claimed or available.
 
 Read the Storyboard:
 
@@ -345,23 +363,49 @@ Read the Storyboard:
 curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/storyboard
 ```
 
-Create the initial four shots. Calling it again returns the saved Board unless
-`{"force":true}` is supplied:
+Create the initial shots. Calling it again returns the saved Board unless
+`{"force":true}` is supplied. An optional `model` overrides the configured
+Studio writing model; optional `max_tokens` is limited to 4096:
 
 ```sh
 curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/storyboard \
-  -H 'Content-Type: application/json' -d '{}'
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen-model","max_tokens":2048}'
 ```
 
-Save edited shots atomically. The server ignores client-provided derived Asset
-state and preserves the existing `asset_id`, `file_url`, and status for each
-known shot ID:
+Regeneration is never implicit. If any current shot is author-edited,
+image-generated, or comes from a legacy board without authorship tracking, a
+forced replacement without acknowledgement returns HTTP `422`
+`STORYBOARD_PROTECTED` and does not write. After the author explicitly confirms
+replacement, send:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/storyboard \
+  -H 'Content-Type: application/json' \
+  -d '{"force":true,"acknowledge_protected":true}'
+```
+
+Replacing the Board never deletes previous image Assets. Only after the author
+explicitly invokes an image-generation action does a shot enter that flow.
+
+Save edited shots atomically. The server accepts the structured fields
+`dramatic_beat`, `action`, `expression`, `performance`, `camera`,
+`visual_description`, and `image_prompt`. `content` remains an alias for
+`action`, and `expression_action` remains a compatibility field. The server
+ignores client-provided derived Asset state and preserves the existing
+`asset_id`, `file_url`, and status for each known shot ID. Once an editable
+field changes, the shot is marked `author_edited = true`; saving an unchanged
+shot does not create that marker:
 
 ```sh
 curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/storyboard \
   -H 'Content-Type: application/json' \
-  -d '{"shots":[{"id":"00000000-0000-4000-8000-000000000010","number":1,"content":"Mara steps into the drowned district.","character_ids":["00000000-0000-4000-8000-000000000003"],"camera":"Wide 24mm establishing shot.","expression_action":"Mara hides her recognition.","visual_description":"Fog, wet stone, sea-blue coat.","image_prompt":"Cinematic 16:9 storyboard frame..."}]}'
+  -d '{"shots":[{"id":"00000000-0000-4000-8000-000000000010","number":1,"dramatic_beat":"Mara crosses the threshold into the place she left.","action":"Mara steps into the drowned district.","character_ids":["00000000-0000-4000-8000-000000000003"],"expression":"Guarded recognition.","performance":"She pauses before the second step and keeps one hand on the map.","camera":"Wide 24mm establishing shot.","visual_description":"Fog, wet stone, sea-blue coat.","image_prompt":"Cinematic 16:9 storyboard frame..."}]}'
 ```
+
+Shot responses also include `source` (`ai`, `deterministic`, or `manual`) and the
+`model` that produced an AI draft. AI output is only a draft; the author can
+edit and save every shot before choosing to generate an image.
 
 Generate an image for one shot:
 
@@ -705,11 +749,13 @@ panels use the shared Asset-library picker and do not duplicate Character or
 Scene data.
 
 Each Scene has a prominent **Create Storyboard** / **Open Storyboard** action.
-The Storyboard view shows large 16:9 shot cards, editable camera, action,
-visual description and image Prompt, Cast selection, image generation and
-regeneration, and a return path to the Scene. Generated images are loaded from
-the managed Asset file URL, so refreshing the page or restarting the backend
-restores both the Storyboard and its visuals.
+The Storyboard view shows large 16:9 shot cards, dramatic beat, action,
+expression, performance, camera, visual description and image Prompt, Cast
+selection, an explicit **Regenerate Storyboard** action with protected-content
+confirmation, image generation and regeneration, and a return path to the
+Scene. Generated images are loaded from the managed Asset file URL, so
+refreshing the page or restarting the backend restores both the Storyboard and
+its visuals.
 
 ## Tests
 
@@ -717,11 +763,13 @@ Run the persistence and HTTP integration suite with the fake engine:
 
 ```sh
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/persistence.scm
+GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/storyboard.scm
 ./test/studio/run.sh
 ```
 
 The runner creates temporary SQLite and Asset directories, starts and stops
 Artanis twice, and checks document, Character, Scene, Cast, Storyboard,
 generated-image Assets, Asset metadata, tags, managed file bytes, missing-file
-errors, upload limits, temporary-file cleanup, and links across a restart. It
-never enables SonicBoom.
+errors, upload limits, temporary-file cleanup, strict AI storyboard schema
+validation, author-edit/generated-image regeneration protection, explicit
+acknowledgement, and links across a restart. It never enables SonicBoom.

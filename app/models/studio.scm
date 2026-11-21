@@ -35,6 +35,7 @@
             studio-get-storyboard
             studio-create-storyboard!
             studio-update-storyboard!
+            studio-validate-storyboard-json
             studio-generate-storyboard-image!
             studio-list-assets
             studio-create-asset!
@@ -836,8 +837,14 @@
 (define max-storyboard-shots 8)
 (define max-shot-text-length 20000)
 (define max-shot-prompt-length 14000)
+(define max-storyboard-context-length 60000)
+(define max-storyboard-ai-tokens 4096)
 (define storyboard-image-width 768)
 (define storyboard-image-height 432)
+
+(define storyboard-ai-shot-fields
+  '("dramatic_beat" "action" "character_ids" "expression"
+    "performance" "camera" "visual_description" "image_prompt"))
 
 (define (storyboard-clip text limit)
   (let ((value (or text "")))
@@ -849,6 +856,14 @@
   (if (and (string? text) (not (string-null? (string-trim-both text))))
       (string-trim-both text)
       fallback))
+
+(define (storyboard-nonempty-text text)
+  (and (string? text)
+       (not (string-null? (string-trim-both text)))
+       (string-trim-both text)))
+
+(define (storyboard-join-text . values)
+  (string-join (filter storyboard-nonempty-text values) "\n\n"))
 
 (define (storyboard-json shots)
   (json-encode (json-normalize (if (list? shots) shots '()))))
@@ -867,9 +882,38 @@
   (or (equal? (configured-engine config) "fake")
       (sonicboom-available?)))
 
+(define (storyboard-normalize-shot shot)
+  (let* ((legacy-content (or (assoc-ref shot "content") ""))
+         (legacy-expression (or (assoc-ref shot "expression_action") ""))
+         (action (or (storyboard-nonempty-text (assoc-ref shot "action"))
+                     legacy-content))
+         (expression (or (storyboard-nonempty-text (assoc-ref shot "expression"))
+                         legacy-expression))
+         (performance (or (assoc-ref shot "performance") ""))
+         (expression-action (or (storyboard-join-text expression performance)
+                                legacy-expression)))
+    (storyboard-shot-set
+     (storyboard-shot-set
+      (storyboard-shot-set
+       (storyboard-shot-set
+        (storyboard-shot-set
+         (storyboard-shot-set
+          (storyboard-shot-set
+           (storyboard-shot-set
+            (storyboard-shot-set shot "action" action)
+            "content" action)
+           "dramatic_beat" (or (assoc-ref shot "dramatic_beat") ""))
+          "expression" expression)
+         "performance" performance)
+        "expression_action" expression-action)
+       "source" (or (assoc-ref shot "source") "deterministic"))
+      "model" (or (assoc-ref shot "model") ""))
+     "author_edited" (and (eq? (assoc-ref shot "author_edited") #t) #t))))
+
 (define (storyboard-payload config scene)
   `(("scene_id" . ,(assoc-ref scene 'id))
-    ("shots" . ,(storyboard-shots (assoc-ref scene 'storyboard)))
+    ("shots" . ,(map storyboard-normalize-shot
+                     (storyboard-shots (assoc-ref scene 'storyboard))))
     ("generation_available" . ,(and (image-generation-available? config) #t))
     ("updated_at" . ,(assoc-ref scene 'updated_at))))
 
@@ -906,8 +950,9 @@
      " · ")))
 
 (define (storyboard-cast-line entry)
-  (format #f "~a — objective: ~a; action: ~a; emotional state: ~a; conflict: ~a; performance direction: ~a; subtext: ~a"
+  (format #f "~a [Character ID: ~a] — objective: ~a; action: ~a; emotional state: ~a; conflict: ~a; performance direction: ~a; subtext: ~a"
           (assoc-ref entry 'character_name)
+          (assoc-ref entry 'character_id)
           (storyboard-text-or (assoc-ref entry 'objective) "not stated")
           (storyboard-text-or (assoc-ref entry 'action) "not stated")
           (storyboard-text-or (assoc-ref entry 'emotional_state) "not stated")
@@ -915,18 +960,84 @@
           (storyboard-text-or (assoc-ref entry 'performance_direction) "not stated")
           (storyboard-text-or (assoc-ref entry 'subtext) "not stated")))
 
+(define (storyboard-identity-lines identity)
+  (filter
+   (lambda (line) line)
+   (map (lambda (entry)
+          (let ((value (assoc-ref identity (car entry))))
+            (and (string? value)
+                 (not (string-null? (string-trim-both value)))
+                 (format #f "- ~a: ~a" (cdr entry)
+                         (storyboard-clip (string-trim-both value) 3000)))))
+        '(("background" . "background") ("personality" . "personality")
+          ("values" . "values") ("motivations" . "motivations")
+          ("fears" . "fears") ("goals" . "goals") ("arc" . "arc")
+          ("standard_appearance" . "standard appearance")
+          ("face" . "face") ("body" . "body") ("hair" . "hair")
+          ("clothing" . "clothing") ("palette" . "palette")
+          ("expressions" . "expressions") ("posture" . "posture")
+          ("habits" . "habits") ("movement" . "movement")
+          ("gestures" . "gestures")
+          ("emotional_responses" . "emotional responses")
+          ("situations" . "situations")))))
+
+(define (storyboard-character-context character entry)
+  (let* ((literary (identity-from-json (assoc-ref character 'literary_identity)))
+         (visual (identity-from-json (assoc-ref character 'visual_identity)))
+         (performance
+          (identity-from-json (assoc-ref character 'performance_identity)))
+         (section (lambda (title identity)
+                    (let ((lines (storyboard-identity-lines identity)))
+                      (format #f "~a\n~a" title
+                              (if (null? lines)
+                                  "- not defined"
+                                  (string-join lines "\n")))))))
+    (string-join
+     (list
+      (storyboard-cast-line entry)
+      (format #f "Name: ~a\nCharacter ID: ~a\nRole: ~a\nSummary: ~a"
+              (assoc-ref character 'name)
+              (assoc-ref character 'id)
+              (storyboard-text-or (assoc-ref character 'role) "not stated")
+              (storyboard-text-or (assoc-ref character 'summary) "not stated"))
+      (section "LITERARY IDENTITY" literary)
+      (section "VISUAL IDENTITY (CANON — AUTHORITATIVE)" visual)
+      (section "PERFORMANCE IDENTITY" performance))
+     "\n")))
+
 (define (storyboard-character-lines cast characters)
   (map (lambda (entry)
          (let ((character (find (lambda (item)
                                   (equal? (assoc-ref item 'id)
                                           (assoc-ref entry 'character_id)))
                                 characters)))
-           (format #f "~a\n~a"
-                   (storyboard-cast-line entry)
-                   (if character
-                       (storyboard-visual-canon character)
-                       "Visual Canon unavailable; do not invent permanent features."))))
+           (if character
+               (storyboard-character-context character entry)
+               (format #f "~a\nVisual Canon unavailable; do not invent permanent features."
+                       (storyboard-cast-line entry)))))
        cast))
+
+(define (storyboard-asset-reference-line asset)
+  (let* ((tags (assoc-ref asset 'tags))
+         (metadata
+          (filter-map
+           (lambda (entry)
+             (let ((value (assoc-ref asset (car entry))))
+               (and value (not (eq? value 'null))
+                    (format #f "~a: ~a" (cdr entry) value))))
+           '(("asset_type" . "type") ("mime_type" . "mime")
+             ("width" . "width") ("height" . "height")
+             ("duration_ms" . "duration ms")))))
+    (format #f "~a — ~a~a"
+            (assoc-ref asset 'name)
+            (storyboard-text-or (assoc-ref asset 'description) "no description")
+            (string-append
+             (if (null? metadata)
+                 ""
+                 (format #f " [~a]" (string-join metadata ", ")))
+             (if (or (not (list? tags)) (null? tags))
+                 ""
+                 (format #f " [tags: ~a]" (string-join tags ", ")))))))
 
 (define (storyboard-asset-references config workplace-id scene-id cast)
   (let ((seen '()) (lines '()))
@@ -937,12 +1048,7 @@
            (unless (member id seen string=?)
              (set! seen (cons id seen))
              (set! lines
-                   (cons (format #f "~a — ~a"
-                                 (assoc-ref asset 'name)
-                                 (storyboard-text-or
-                                  (assoc-ref asset 'description)
-                                  (assoc-ref asset 'mime_type)))
-                         lines)))))
+                   (cons (storyboard-asset-reference-line asset) lines)))))
        assets))
     (add-assets (db:studio-list-linked-assets config workplace-id "scene" scene-id))
     (for-each
@@ -956,8 +1062,10 @@
 (define (storyboard-shot-set shot key value)
   (acons key value (alist-delete key shot equal?)))
 
-(define (storyboard-shot number content camera expression visual ids names
-                         scene cast characters references)
+(define* (storyboard-shot number content camera expression visual ids names
+                          scene cast characters references
+                          #:key (dramatic-beat "") (performance "")
+                          (model ""))
   (let* ((setting (storyboard-setting scene))
          (cast-lines (storyboard-character-lines cast characters))
          (prompt-lines
@@ -979,19 +1087,26 @@
                  "STYLE: Cinematic storyboard frame, 16:9, warm naturalistic production design, restrained film lighting, readable staging, no text, no captions, no UI, no borders."))))
     `(("id" . ,(db:studio-new-id))
       ("number" . ,number)
+      ("dramatic_beat" . ,dramatic-beat)
+      ("action" . ,content)
       ("content" . ,content)
       ("character_ids" . ,ids)
       ("characters" . ,names)
       ("camera" . ,camera)
+      ("expression" . ,expression)
+      ("performance" . ,performance)
       ("expression_action" . ,expression)
       ("visual_description" . ,visual)
       ("image_prompt" . ,(storyboard-clip (string-join prompt-lines "\n")
                                          max-shot-prompt-length))
       ("asset_id" . null)
       ("file_url" . null)
-      ("status" . "pending"))))
+      ("status" . "pending")
+      ("source" . "deterministic")
+      ("model" . ,model)
+      ("author_edited" . #f))))
 
-(define (storyboard-generated-shots scene cast characters references)
+(define (storyboard-generated-shots scene cast characters references model)
   (let* ((ids (map (lambda (entry) (assoc-ref entry 'character_id)) cast))
          (names (map (lambda (entry) (assoc-ref entry 'character_name)) cast))
          (setting (storyboard-text-or (storyboard-setting scene)
@@ -1043,28 +1158,40 @@
       "Wide establishing shot, 24mm lens, eye level, deep staging; the geography and social distance of the room are readable."
       (format #f "The room holds its opening tension. ~a" emotions)
       (format #f "~a\n~a" setting visuals)
-      ids names scene cast characters references)
+      ids names scene cast characters references
+      #:dramatic-beat "Establish the world, the social distance, and the pressure already in the room."
+      #:performance "Hold the Cast in their opening postures; let small reactions register before anyone speaks."
+      #:model model)
      (storyboard-shot
       2
       (storyboard-clip (format #f "Pressure gathers around one question: ~a. The conflict is ~a." question conflict) 1600)
       "Medium two-shot, 35mm lens, slightly off-axis, foreground obstruction framing the distance between the characters."
       (format #f "Small reactions reveal what each person refuses to say. ~a" emotions)
       (format #f "~a\n~a" setting visuals)
-      ids names scene cast characters references)
+      ids names scene cast characters references
+      #:dramatic-beat "Bring the central question into the room and make avoidance visible."
+      #:performance "Create a change of distance between the characters without resolving the conflict."
+      #:model model)
      (storyboard-shot
       3
       (storyboard-clip (format #f "Action: ~a. The scene's pressure becomes physical." actions) 1700)
       "Medium close-up, 50mm lens, controlled handheld drift, focus shifts with the active character's objective."
       (format #f "~a. Keep gestures specific to the Visual Canon and the scene's performance direction." actions)
       (format #f "~a\n~a" setting visuals)
-      ids names scene cast characters references)
+      ids names scene cast characters references
+      #:dramatic-beat "Turn intention into action; the scene's pressure becomes physical."
+      #:performance "Each gesture should pursue a scene objective and meet a concrete resistance."
+      #:model model)
      (storyboard-shot
       4
       (storyboard-clip (format #f "The turn: ~a. Hold on the irreversible reaction." turn) 1600)
       "Close-up, 85mm lens, shallow focus, stillness after movement; the turn lands on a face and a changed spatial relation."
       (format #f "The reaction carries the cost of the turn without declaring it in dialogue. ~a" emotions)
       (format #f "~a\n~a" setting visuals)
-      ids names scene cast characters references))))
+      ids names scene cast characters references
+      #:dramatic-beat "Land the turn and show its cost in a changed relationship or spatial balance."
+      #:performance "End on a reaction that carries the consequence without announcing it in dialogue."
+      #:model model))))
 
 (define (storyboard-current-shots scene)
   (storyboard-shots (assoc-ref scene 'storyboard)))
@@ -1072,25 +1199,44 @@
 (define (storyboard-cast-ids cast)
   (map (lambda (entry) (assoc-ref entry 'character_id)) cast))
 
+(define (storyboard-shot-input-string value key default max)
+  (if (object-has? value key)
+      (string-field value key #:allow-empty #t #:default default #:max max)
+      default))
+
+(define (storyboard-shot-signature shot)
+  `(,(assoc-ref shot "number")
+    ,(assoc-ref shot "dramatic_beat")
+    ,(assoc-ref shot "action")
+    ,(sort (list-copy (assoc-ref shot "character_ids")) string<?)
+    ,(assoc-ref shot "expression")
+    ,(assoc-ref shot "performance")
+    ,(assoc-ref shot "camera")
+    ,(assoc-ref shot "visual_description")
+    ,(assoc-ref shot "image_prompt")))
+
 (define (storyboard-shot-value value index current cast)
   (unless (object? value)
     (api-fail 400 "VALIDATION_ERROR"
               (format #f "shots[~a] must be an object" index)))
   (require-object-fields
    value (format #f "shots[~a]" index)
-   '("id" "number" "content" "character_ids" "camera"
-     "expression_action" "visual_description" "image_prompt"
+   '("id" "number" "dramatic_beat" "action" "content" "character_ids"
+     "camera" "expression" "performance" "expression_action"
+     "visual_description" "image_prompt"
      ;; Derived fields are accepted for round-tripping from the UI, but the
      ;; server preserves their authoritative values below.
-     "characters" "asset_id" "file_url" "status"))
+     "characters" "asset_id" "file_url" "status" "source" "model"
+     "author_edited"))
   (let* ((raw-id (object-ref value "id"))
          (id (cond ((not raw-id) (db:studio-new-id))
                    ((valid-uuid? raw-id) (string-downcase raw-id))
                    (else (api-fail 400 "VALIDATION_ERROR"
                                    (format #f "shots[~a].id must be a UUID" index)))))
-         (previous (find (lambda (shot)
-                           (equal? (assoc-ref shot "id") id))
-                         current))
+         (previous-raw (find (lambda (shot)
+                               (equal? (assoc-ref shot "id") id))
+                             current))
+         (previous (and previous-raw (storyboard-normalize-shot previous-raw)))
          (ids (json-array-list (or (object-ref value "character_ids") '())
                                (format #f "shots[~a].character_ids" index)))
          (cast-ids (storyboard-cast-ids cast)))
@@ -1101,6 +1247,13 @@
          (api-fail 422 "INVALID_SHOT_CHARACTER"
                    "Every shot Character must be cast in this Scene")))
      ids)
+    (let loop ((rest ids) (seen '()))
+      (when (pair? rest)
+        (let ((character-id (string-downcase (car rest))))
+          (when (member character-id seen string=?)
+            (api-fail 400 "VALIDATION_ERROR"
+                      "A Character can only appear once in a Shot"))
+          (loop (cdr rest) (cons character-id seen)))))
     (let* ((ids (map string-downcase ids))
            (names (map (lambda (character-id)
                          (let ((entry (find (lambda (item)
@@ -1114,6 +1267,66 @@
                                                (or (assoc-ref previous "number")
                                                    (+ index 1))
                                                (+ index 1))))
+           (previous-action (if previous (assoc-ref previous "action") ""))
+           (previous-content (if previous (assoc-ref previous "content") ""))
+           (incoming-action (and (object-has? value "action")
+                                 (storyboard-shot-input-string
+                                  value "action" "" max-shot-text-length)))
+           (incoming-content (and (object-has? value "content")
+                                  (storyboard-shot-input-string
+                                   value "content" "" max-shot-text-length)))
+           (action (cond
+                    ((and incoming-action incoming-content)
+                     (cond
+                      ((and (equal? incoming-action previous-action)
+                            (not (equal? incoming-content previous-content)))
+                       incoming-content)
+                      (else incoming-action)))
+                    (incoming-action incoming-action)
+                    (incoming-content incoming-content)
+                    (else previous-action)))
+           (dramatic-beat
+            (storyboard-shot-input-string
+             value "dramatic_beat"
+             (if previous (or (assoc-ref previous "dramatic_beat") "") "")
+             max-shot-text-length))
+           (incoming-expression
+            (and (object-has? value "expression")
+                 (storyboard-shot-input-string
+                  value "expression" "" max-shot-text-length)))
+           (incoming-expression-action
+            (and (object-has? value "expression_action")
+                 (storyboard-shot-input-string
+                  value "expression_action" "" max-shot-text-length)))
+           (expression
+            (cond (incoming-expression incoming-expression)
+                  (incoming-expression-action incoming-expression-action)
+                  (previous (or (assoc-ref previous "expression") ""))
+                  (else "")))
+           (performance
+            (storyboard-shot-input-string
+             value "performance"
+             (if previous (or (assoc-ref previous "performance") "") "")
+             max-shot-text-length))
+           (expression-action
+            (or (storyboard-join-text expression performance)
+                incoming-expression-action ""))
+           (camera (storyboard-shot-input-string
+                    value "camera"
+                    (if previous (or (assoc-ref previous "camera") "") "")
+                    max-shot-text-length))
+           (visual (storyboard-shot-input-string
+                    value "visual_description"
+                    (if previous
+                        (or (assoc-ref previous "visual_description") "")
+                        "")
+                    max-shot-text-length))
+           (image-prompt (storyboard-shot-input-string
+                          value "image_prompt"
+                          (if previous
+                              (or (assoc-ref previous "image_prompt") "")
+                              "")
+                          max-shot-prompt-length))
            (asset-id (if previous
                          (let ((asset (assoc-ref previous "asset_id")))
                            (if (and asset (not (eq? asset 'null))) asset 'null))
@@ -1124,27 +1337,39 @@
                          'null))
            (status (if previous
                        (or (assoc-ref previous "status") "pending")
-                       "pending")))
-      `(("id" . ,id)
-        ("number" . ,number)
-        ("content" . ,(string-field value "content" #:allow-empty #t
-                                    #:default "" #:max max-shot-text-length))
-        ("character_ids" . ,ids)
-        ("characters" . ,(filter-map (lambda (name) name) names))
-        ("camera" . ,(string-field value "camera" #:allow-empty #t
-                                   #:default "" #:max max-shot-text-length))
-        ("expression_action"
-         . ,(string-field value "expression_action" #:allow-empty #t
-                          #:default "" #:max max-shot-text-length))
-        ("visual_description"
-         . ,(string-field value "visual_description" #:allow-empty #t
-                          #:default "" #:max max-shot-text-length))
-        ("image_prompt" . ,(string-field value "image_prompt" #:allow-empty #t
-                                         #:default ""
-                                         #:max max-shot-prompt-length))
-        ("asset_id" . ,asset-id)
-        ("file_url" . ,file-url)
-        ("status" . ,status)))))
+                       "pending"))
+           (source (if previous
+                       (or (assoc-ref previous "source") "manual")
+                       "manual"))
+           (model (if previous (or (assoc-ref previous "model") "") ""))
+           (candidate
+            `(("id" . ,id)
+              ("number" . ,number)
+              ("dramatic_beat" . ,dramatic-beat)
+              ("action" . ,action)
+              ("content" . ,action)
+              ("character_ids" . ,ids)
+              ("characters" . ,(filter-map (lambda (name) name) names))
+              ("camera" . ,camera)
+              ("expression" . ,expression)
+              ("performance" . ,performance)
+              ("expression_action" . ,expression-action)
+              ("visual_description" . ,visual)
+              ("image_prompt" . ,image-prompt)
+              ("asset_id" . ,asset-id)
+              ("file_url" . ,file-url)
+              ("status" . ,status)
+              ("source" . ,source)
+              ("model" . ,model)
+              ("author_edited" . #f)))
+           (author-edited
+            (if previous
+                (or (eq? (assoc-ref previous "author_edited") #t)
+                    (not (equal? (storyboard-shot-signature previous)
+                                 (storyboard-shot-signature candidate))))
+                #t)))
+      (storyboard-shot-set candidate "author_edited"
+                           (and author-edited #t)))))
 
 (define (storyboard-shots-from-body body current cast)
   (unless (object-has? body "shots")
@@ -1166,19 +1391,334 @@
             (loop (cdr rest) (cons id seen)))))
       shots)))
 
+(define (storyboard-ai-fail message)
+  (api-fail 502 "INVALID_STORYBOARD_OUTPUT" message))
+
+(define (storyboard-ai-object-fields object label allowed)
+  (unless (object? object)
+    (storyboard-ai-fail (format #f "~a must be a JSON object" label)))
+  (for-each
+   (lambda (entry)
+     (unless (member (car entry) allowed)
+       (storyboard-ai-fail
+        (format #f "~a.~a is not part of the storyboard schema"
+                label (car entry)))))
+   object))
+
+(define (storyboard-ai-array value label)
+  (cond
+   ((vector? value) (vector->list value))
+   ((or (null? value) (list? value))
+    (storyboard-ai-fail (format #f "~a must be a JSON array" label)))
+   (else (storyboard-ai-fail (format #f "~a must be a JSON array" label)))))
+
+(define (storyboard-ai-string shot label key max allow-empty)
+  (unless (object-has? shot key)
+    (storyboard-ai-fail (format #f "~a.~a is required" label key)))
+  (let ((value (object-ref shot key)))
+    (unless (string? value)
+      (storyboard-ai-fail (format #f "~a.~a must be a string" label key)))
+    (when (and (not allow-empty) (string-null? (string-trim-both value)))
+      (storyboard-ai-fail (format #f "~a.~a must not be empty" label key)))
+    (when (> (string-length value) max)
+      (storyboard-ai-fail (format #f "~a.~a is too large" label key)))
+    value))
+
+(define (storyboard-ai-shot shot index cast-ids)
+  (let ((label (format #f "shots[~a]" index)))
+    (storyboard-ai-object-fields shot label storyboard-ai-shot-fields)
+    (let* ((raw-ids (and (object-has? shot "character_ids")
+                         (object-ref shot "character_ids")))
+           (_ (unless (object-has? shot "character_ids")
+                (storyboard-ai-fail
+                 (format #f "~a.character_ids is required" label))))
+           (ids (storyboard-ai-array raw-ids
+                                     (format #f "~a.character_ids" label)))
+           (ids (map (lambda (character-id)
+                       (unless (and (string? character-id)
+                                    (valid-uuid? character-id))
+                         (storyboard-ai-fail
+                          (format #f "~a.character_ids must contain UUIDs" label)))
+                       (string-downcase character-id))
+                     ids)))
+      (let loop ((rest ids) (seen '()))
+        (when (pair? rest)
+          (when (member (car rest) seen string=?)
+            (storyboard-ai-fail
+             (format #f "~a.character_ids contains a duplicate" label)))
+          (loop (cdr rest) (cons (car rest) seen))))
+      (for-each
+       (lambda (character-id)
+         (unless (member character-id cast-ids string=?)
+           (storyboard-ai-fail
+            (format #f "~a references a Character outside this Scene cast"
+                    label))))
+       ids)
+      `(("dramatic_beat"
+         . ,(storyboard-ai-string shot label "dramatic_beat"
+                                  max-shot-text-length #f))
+        ("action" . ,(storyboard-ai-string shot label "action"
+                                         max-shot-text-length #f))
+        ("character_ids" . ,ids)
+        ("expression" . ,(storyboard-ai-string shot label "expression"
+                                             max-shot-text-length #t))
+        ("performance" . ,(storyboard-ai-string shot label "performance"
+                                               max-shot-text-length #t))
+        ("camera" . ,(storyboard-ai-string shot label "camera"
+                                         max-shot-text-length #f))
+        ("visual_description"
+         . ,(storyboard-ai-string shot label "visual_description"
+                                  max-shot-text-length #f))
+        ("image_prompt" . ,(storyboard-ai-string shot label "image_prompt"
+                                               max-shot-prompt-length #f))))))
+
+(define (studio-validate-storyboard-json text cast-ids)
+  (unless (string? text)
+    (storyboard-ai-fail "The storyboard model returned no JSON"))
+  (catch #t
+    (lambda ()
+      (let* ((trimmed (string-trim-both text))
+             (root (json-string->scm trimmed)))
+        (storyboard-ai-object-fields root "storyboard" '("shots"))
+        (unless (object-has? root "shots")
+          (storyboard-ai-fail "storyboard.shots is required"))
+        (let* ((shot-values (storyboard-ai-array
+                             (object-ref root "shots") "storyboard.shots"))
+               (count (length shot-values)))
+          (unless (and (>= count 1) (<= count max-storyboard-shots))
+            (storyboard-ai-fail
+             (format #f "storyboard.shots must contain between 1 and ~a shots"
+                     max-storyboard-shots)))
+          (map (lambda (shot index)
+                 (storyboard-ai-shot shot index cast-ids))
+               shot-values (iota count)))))
+    (lambda (key . args)
+      (if (eq? key 'studio-api-error)
+          (apply throw key args)
+          (storyboard-ai-fail
+           "The storyboard model did not return valid JSON")))))
+
+(define (storyboard-context-line label value)
+  (let ((text (storyboard-nonempty-text value)))
+    (and text (format #f "~a: ~a" label (storyboard-clip text 5000)))))
+
+(define (storyboard-scene-context scene cast characters references)
+  (let* ((given
+          (filter-map
+           (lambda (entry)
+             (storyboard-context-line
+              (cdr entry)
+              (assoc-ref scene (string->symbol (car entry)))))
+           '(("time" . "Time") ("place" . "Place")
+             ("environment" . "Environment")
+             ("background" . "Background")
+             ("prior_events" . "Prior events"))))
+         (dramatic
+          (filter-map
+           (lambda (entry)
+             (storyboard-context-line
+              (cdr entry)
+              (assoc-ref scene (string->symbol (car entry)))))
+           '(("central_question" . "Central question")
+             ("primary_conflict" . "Primary conflict")
+             ("turn" . "Turn"))))
+         (direction
+          (filter-map
+           (lambda (entry)
+             (storyboard-context-line
+              (cdr entry)
+              (assoc-ref scene (string->symbol (car entry)))))
+           '(("blocking" . "Blocking") ("spatial" . "Spatial")
+             ("performance_direction" . "Performance direction")
+             ("camera" . "Camera")))))
+    (string-join
+     (filter
+      storyboard-nonempty-text
+      (list
+       (format #f "SCENE TITLE: ~a" (assoc-ref scene 'title))
+       (storyboard-context-line "Summary" (assoc-ref scene 'summary))
+       (format #f "GIVEN CIRCUMSTANCES\n~a"
+               (if (null? given)
+                   "- not specified"
+                   (string-join given "\n")))
+       (format #f "DRAMATIC SITUATION\n~a"
+               (if (null? dramatic)
+                   "- not specified"
+                   (string-join dramatic "\n")))
+       (format #f "DIALOGUE\n~a"
+               (storyboard-text-or (assoc-ref scene 'dialogue) "not supplied"))
+       (format #f "DIRECTION\n~a"
+               (if (null? direction)
+                   "- not specified"
+                   (string-join direction "\n")))
+       (format #f "CAST — SCENE-SPECIFIC CONTEXT\n~a"
+               (if (null? cast)
+                   "No Character is cast in this Scene."
+                   (string-join
+                    (storyboard-character-lines cast characters) "\n\n")))
+       (format #f "REFERENCE ASSETS — TEXT METADATA ONLY\n~a"
+               (if (null? references)
+                   "No Assets are linked to this Scene or its Cast."
+                   (string-join references "\n")))
+       "The Asset metadata above is text. You have not seen image pixels. Do not claim otherwise."))
+     "\n\n")))
+
+(define (storyboard-ai-prepared config scene cast characters references body)
+  (let* ((model (resolve-model config (or body '())))
+         (engine (resolve-engine config))
+         (system (read-prompt "storyboard.md"))
+         (max-tokens (optional-integer-field body "max_tokens" 256
+                                             max-storyboard-ai-tokens 2048))
+         (context (storyboard-clip
+                   (storyboard-scene-context scene cast characters references)
+                   max-storyboard-context-length)))
+    `((model . ,model)
+      (engine . ,engine)
+      (messages
+       . ,(list `(("role" . "system") ("content" . ,system))
+                `(("role" . "user") ("content" . ,context))))
+      (options . (("temperature" . 0.55)
+                  ("num_predict" . ,max-tokens)
+                  ("format" . "json"))))))
+
+(define (storyboard-shot-character-names ids cast)
+  (map (lambda (character-id)
+         (let ((entry (find (lambda (item)
+                              (equal? (assoc-ref item 'character_id)
+                                      character-id))
+                            cast)))
+           (or (and entry (assoc-ref entry 'character_name)) "Unknown Character")))
+       ids))
+
+(define (storyboard-ai-image-prompt prompt ids characters references)
+  (let* ((canon
+          (if (null? ids)
+              "No Character appears in this shot. Do not invent a recurring character."
+              (string-join
+               (map (lambda (character-id)
+                      (let ((character
+                             (find (lambda (item)
+                                     (equal? (assoc-ref item 'id) character-id))
+                                   characters)))
+                        (if character
+                            (storyboard-visual-canon character)
+                            (format #f "~a: Visual Canon unavailable; do not invent permanent features."
+                                    character-id))))
+                    ids)
+               "\n")))
+         (reference-line
+          (if (null? references)
+              "Reference Assets: none linked."
+              (format #f "Reference Assets (metadata only): ~a"
+                      (string-join references "; ")))))
+    (storyboard-clip
+     (string-join
+      (list "VISUAL CANON — AUTHORITATIVE; DO NOT ALTER PERMANENT FEATURES"
+            canon
+            "Keep face, body, hair, clothing, palette and distinguishing features identical. Expressions, poses, action and lighting may change."
+            reference-line
+            "SHOT"
+            prompt
+            "STYLE: Cinematic 16:9 storyboard frame, warm naturalistic production design, restrained film lighting, readable staging, no text, captions, UI or borders.")
+      "\n\n")
+     max-shot-prompt-length)))
+
+(define (storyboard-ai-shots parsed cast characters model references)
+  (map (lambda (shot index)
+         (let* ((ids (assoc-ref shot "character_ids"))
+                (names (storyboard-shot-character-names ids cast))
+                (action (assoc-ref shot "action"))
+                (expression (assoc-ref shot "expression"))
+                (performance (assoc-ref shot "performance")))
+           `(("id" . ,(db:studio-new-id))
+             ("number" . ,(+ index 1))
+             ("dramatic_beat" . ,(assoc-ref shot "dramatic_beat"))
+             ("action" . ,action)
+             ("content" . ,action)
+             ("character_ids" . ,ids)
+             ("characters" . ,names)
+             ("camera" . ,(assoc-ref shot "camera"))
+             ("expression" . ,expression)
+             ("performance" . ,performance)
+             ("expression_action"
+              . ,(or (storyboard-join-text expression performance) ""))
+             ("visual_description" . ,(assoc-ref shot "visual_description"))
+             ("image_prompt"
+              . ,(storyboard-ai-image-prompt
+                  (assoc-ref shot "image_prompt") ids characters references))
+             ("asset_id" . null)
+             ("file_url" . null)
+             ("status" . "pending")
+             ("source" . "ai")
+             ("model" . ,model)
+             ("author_edited" . #f))))
+       parsed (iota (length parsed))))
+
 (define (studio-get-storyboard config workplace-id scene-id)
   (let* ((workplace (require-workplace config workplace-id))
          (wid (assoc-ref workplace 'id))
          (scene (require-scene config wid scene-id)))
     (storyboard-payload config scene)))
 
+(define (storyboard-boolean-field body key)
+  (let ((value (object-ref body key)))
+    (cond ((not (object-has? body key)) #f)
+          ((boolean? value) value)
+          (else (api-fail 400 "VALIDATION_ERROR"
+                          (format #f "~a must be a boolean" key))))))
+
+(define (storyboard-protected-shot? shot)
+  (let ((asset-id (assoc-ref shot "asset_id"))
+        (file-url (assoc-ref shot "file_url"))
+        (status (assoc-ref shot "status")))
+    (or ;; Boards saved before authorship tracking cannot be proven untouched.
+        (not (or (assoc "source" shot) (assoc "author_edited" shot)))
+        (eq? (assoc-ref shot "author_edited") #t)
+        (equal? status "generated")
+        (and asset-id (not (eq? asset-id 'null)))
+        (and file-url (not (eq? file-url 'null))))))
+
+(define (storyboard-protected-count shots)
+  (length (filter storyboard-protected-shot? shots)))
+
+(define (storyboard-run-ai-generation config scene cast characters references body)
+  (catch #t
+    (lambda ()
+      (let* ((prepared
+              (storyboard-ai-prepared config scene cast characters
+                                      references body))
+             (cast-ids (storyboard-cast-ids cast))
+             (result (studio-run-ai prepared))
+             (text (or (assoc-ref result 'text)
+                       (assoc-ref result "text")
+                       ""))
+             (parsed (studio-validate-storyboard-json text cast-ids))
+             (model (assoc-ref prepared 'model)))
+        (storyboard-ai-shots parsed cast characters model references)))
+    (lambda (key . args)
+      (if (eq? key 'studio-api-error)
+          (apply throw key args)
+          (begin
+            (format (current-error-port) "Storyboard model generation failed: ~s ~s~%"
+                    key args)
+            (api-fail 502 "GENERATION_FAILED"
+                      "The storyboard model failed to generate a valid board"))))))
+
 (define (studio-create-storyboard! config workplace-id scene-id body)
-  (let* ((workplace (require-workplace config workplace-id))
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
          (wid (assoc-ref workplace 'id))
          (scene (require-scene config wid scene-id))
          (sid (assoc-ref scene 'id))
-         (current (storyboard-current-shots scene))
-         (force (eq? (object-ref body "force") #t)))
+         (current-raw (storyboard-current-shots scene))
+         (current (map storyboard-normalize-shot current-raw))
+         (force (storyboard-boolean-field body "force"))
+         (acknowledge (storyboard-boolean-field body "acknowledge_protected"))
+         (protected-count (storyboard-protected-count current-raw)))
+    (when (and force (not acknowledge) (> protected-count 0))
+      (api-fail 422 "STORYBOARD_PROTECTED"
+                "Regeneration would replace author-edited or image-generated shots"
+                (cons "protected_shots" protected-count)))
     (if (and (pair? current) (not force))
         (storyboard-payload config scene)
         (let* ((cast (db:studio-list-scene-cast config wid sid))
@@ -1188,7 +1728,12 @@
                                config wid (assoc-ref entry 'character_id)))
                             cast))
                (references (storyboard-asset-references config wid sid cast))
-               (shots (storyboard-generated-shots scene cast characters references))
+               (shots
+                (if (equal? (configured-engine config) "fake")
+                    (storyboard-generated-shots scene cast characters references
+                                                (default-model config))
+                    (storyboard-run-ai-generation
+                     config scene cast characters references body)))
                (saved (db:studio-update-scene!
                        config wid sid
                        `((storyboard . ,(storyboard-json shots))))))
@@ -1216,7 +1761,8 @@
          (wid (assoc-ref workplace 'id))
          (scene (require-scene config wid scene-id))
          (sid (assoc-ref scene 'id))
-         (shots (storyboard-current-shots scene))
+         (shots (map storyboard-normalize-shot
+                     (storyboard-current-shots scene)))
          (shot (find (lambda (item)
                        (equal? (assoc-ref item "id")
                                (require-uuid-in-path shot-id "Shot")))

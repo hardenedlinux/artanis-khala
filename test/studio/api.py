@@ -352,10 +352,24 @@ storyboard = json_request(
 shots = storyboard["shots"]
 check("storyboard-created", len(shots) == 4 and storyboard["generation_available"])
 check(
+    "storyboard-has-dramatic-shot-fields",
+    all(
+        shot["dramatic_beat"]
+        and shot["action"]
+        and shot["expression"]
+        and shot["performance"]
+        and shot["source"] == "deterministic"
+        and shot["author_edited"] is False
+        for shot in shots
+    ),
+)
+check(
     "storyboard-uses-existing-context",
     "Tall, weathered blue coat." in shots[0]["image_prompt"]
     and "Make Ilyan admit he lied." in shots[0]["image_prompt"]
-    and "The northern harbor" in shots[0]["image_prompt"],
+    and "The northern harbor" in shots[0]["image_prompt"]
+    and "Raised beside the northern harbor." in shots[0]["image_prompt"]
+    and "Taps the table twice before speaking." in shots[0]["image_prompt"],
 )
 scene_with_board = json_request(
     "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}"
@@ -373,7 +387,26 @@ edited_board = json_request(
 check(
     "storyboard-edited-and-saved",
     edited_board["shots"][0]["content"].startswith("Mara steps")
-    and "AUTHOR EDIT" in edited_board["shots"][0]["image_prompt"],
+    and "AUTHOR EDIT" in edited_board["shots"][0]["image_prompt"]
+    and edited_board["shots"][0]["author_edited"] is True,
+)
+status, body, _ = request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard",
+    {"force": True},
+)
+check(
+    "storyboard-regeneration-protects-author-edits",
+    status == 422
+    and json.loads(body)["error"]["code"] == "STORYBOARD_PROTECTED",
+)
+protected_board = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard"
+)
+check(
+    "storyboard-protected-content-not-overwritten",
+    protected_board["shots"][0]["content"].startswith("Mara steps")
+    and "AUTHOR EDIT" in protected_board["shots"][0]["image_prompt"],
 )
 shot_id = edited_board["shots"][0]["id"]
 generated = json_request(
@@ -423,6 +456,16 @@ old_asset = json_request(
 check("storyboard-regeneration-keeps-old-asset", old_asset["id"] == generated["asset"]["id"])
 status, body, _ = request(
     "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard",
+    {"force": True},
+)
+check(
+    "storyboard-regeneration-protects-generated-shot",
+    status == 422
+    and json.loads(body)["error"]["code"] == "STORYBOARD_PROTECTED",
+)
+status, body, _ = request(
+    "POST",
     f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard/shots/{uuid.uuid4()}/image",
 )
 check("storyboard-unknown-shot-404", status == 404)
@@ -462,6 +505,39 @@ check(
         "GET",
         f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/cast",
     )) == 1,
+)
+
+second_board = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/storyboard",
+    {},
+)
+second_edited = json.loads(json.dumps(second_board))
+second_edited["shots"][0]["dramatic_beat"] = "Author-shaped beat."
+json_request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/storyboard",
+    {"shots": second_edited["shots"]},
+)
+status, body, _ = request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/storyboard",
+    {"force": True},
+)
+check(
+    "storyboard-protected-requires-acknowledgement",
+    status == 422
+    and json.loads(body)["error"]["code"] == "STORYBOARD_PROTECTED",
+)
+acknowledged = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/storyboard",
+    {"force": True, "acknowledge_protected": True},
+)
+check(
+    "storyboard-regenerates-after-explicit-acknowledgement",
+    len(acknowledged["shots"]) == 4
+    and acknowledged["shots"][0]["id"] != second_board["shots"][0]["id"],
 )
 
 other_character = json_request(

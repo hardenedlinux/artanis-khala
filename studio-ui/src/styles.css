@@ -411,6 +411,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .shot-card-topline em { color: #9B8B76; font-style: normal; letter-spacing: .04em; }
 .shot-card-topline em.ready { color: #5D7461; }
 .shot-card h3 { margin: 0; color: #393229; font: 400 17px/1.45 var(--serif); }
+.shot-beat { display: flex; gap: 7px; margin: 0; color: #6C5743; font: 10px/1.6 var(--serif); }
+.shot-beat strong { flex: none; color: #9A7048; font-size: 7px; letter-spacing: .12em; }
+.shot-performance { margin: 0; color: #8A7A66; font: 9px/1.6 var(--serif); }
 .shot-camera { display: -webkit-box; margin: 0; overflow: hidden; color: #817362; font: 9px/1.65 var(--serif); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .shot-cast-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .shot-cast-chips span { padding: 3px 6px; border: 1px solid #CBB89E; color: #6D5D49; background: #EFE4D2; font: 8px var(--serif); }
