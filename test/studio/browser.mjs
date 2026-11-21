@@ -90,8 +90,8 @@ async function main() {
     check("browser-canon-visible", true);
 
     await page.reload({ waitUntil: "networkidle" });
-    await page.locator(".book-card", { hasText: workplace.title }).click();
     await page.getByRole("navigation", { name: "Workplace sections" }).waitFor();
+    await page.locator(".header-title", { hasText: workplace.title }).waitFor();
     await page.getByRole("button", { name: /^角色\s*CHARACTERS$/ }).click();
     await page.getByRole("button", { name: new RegExp(characterName) }).waitFor();
     await page.getByRole("button", { name: new RegExp(characterName) }).click();
@@ -101,6 +101,23 @@ async function main() {
     await page.getByRole("button", { name: /^视觉作品\s*ARTWORK$/ }).click();
     await page.locator(".artwork-stage img").waitFor({ timeout: 30_000 });
     check("browser-reload-persistence", true);
+
+    await page.getByRole("button", { name: "合上书本" }).click();
+    await page.getByRole("button", { name: "打开示例故事" }).waitFor();
+    await page.getByRole("button", { name: "打开示例故事" }).click();
+    await page.getByRole("navigation", { name: "Workplace sections" }).waitFor();
+    await page.getByText("[SAMPLE] The Last Lamp", { exact: true }).first().waitFor();
+    check("browser-sample-story-opens", true);
+
+    await page.getByRole("button", { name: /^素材\s*ASSETS$/ }).click();
+    await page.getByText("Tide Gate — Illustrative Storyboard Plate").first().waitFor();
+    await page.getByText("示意", { exact: false }).first().waitFor();
+    check("browser-sample-asset-labeled-illustrative", true);
+
+    await page.reload({ waitUntil: "networkidle" });
+    await page.getByRole("navigation", { name: "Workplace sections" }).waitFor();
+    await page.getByText("Tide Gate — Illustrative Storyboard Plate").first().waitFor();
+    check("browser-context-restored-after-refresh", true);
 
     check("browser-no-page-errors", pageErrors.length === 0);
   } finally {

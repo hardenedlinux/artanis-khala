@@ -82,6 +82,142 @@ check(
     and capabilities["image_generation"]["reference_mode"] == "fake-byte-buffer",
 )
 
+settings = json_request("GET", "/studio/api/v1/settings")
+check(
+    "settings-has-provider-presets-and-tasks",
+    "custom-openai" in settings["provider_presets"]
+    and "openai-compatible" in settings["protocols"]
+    and settings["tasks"]
+    == ["writing", "character_development", "scene_extraction", "storyboard_planning"],
+)
+legacy_profile_id = settings["default_llm_profile_id"]
+check(
+    "settings-legacy-writing-model-migrated",
+    settings["legacy"]["engine"] == "fake"
+    and any(item["id"] == legacy_profile_id for item in settings["llm_profiles"]),
+)
+fake_test = json_request(
+    "POST", f"/studio/api/v1/settings/model-profiles/{legacy_profile_id}/test", {}
+)
+check("settings-fake-profile-connection-test", fake_test["ok"] is True)
+fake_models = json_request(
+    "POST", f"/studio/api/v1/settings/model-profiles/{legacy_profile_id}/models", {}
+)
+check("settings-fake-profile-model-list", any(item["id"] == "fake" for item in fake_models["models"]))
+
+openai_profile = json_request(
+    "POST",
+    "/studio/api/v1/settings/model-profiles",
+    {
+        "name": "DeepSeek Author",
+        "provider": "deepseek",
+        "protocol": "openai-compatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model_id": "deepseek-chat",
+        "api_key": "sk-live-should-never-return",
+        "custom_headers": {"X-Studio-Trace": "api-test"},
+        "timeout_seconds": 30,
+        "parameters": {"temperature": 0.45, "max_output_tokens": 2048, "stream": True},
+        "capabilities": {
+            "temperature": True,
+            "top_p": True,
+            "streaming": True,
+            "json": True,
+            "reasoning": False,
+        },
+    },
+    201,
+)
+openai_profile_id = openai_profile["id"]
+check(
+    "settings-profile-key-masked",
+    openai_profile["api_key_configured"] is True
+    and openai_profile["api_key_masked"]
+    and "api_key" not in openai_profile,
+)
+_, settings_raw, _ = request("GET", "/studio/api/v1/settings")
+check(
+    "settings-get-never-returns-secret",
+    b"sk-live-should-never-return" not in settings_raw,
+)
+updated_profile = json_request(
+    "PUT",
+    f"/studio/api/v1/settings/model-profiles/{openai_profile_id}",
+    {"name": "DeepSeek Author Rewrite", "api_key": ""},
+)
+check(
+    "settings-blank-key-preserved",
+    updated_profile["api_key_configured"] is True
+    and updated_profile["api_key_masked"] == openai_profile["api_key_masked"],
+)
+status, body, _ = request(
+    "POST",
+    "/studio/api/v1/settings/model-profiles",
+    {
+        "name": "Unsafe Headers",
+        "protocol": "openai-compatible",
+        "base_url": "https://example.com/v1",
+        "model_id": "anything",
+        "custom_headers": {"Authorization": "secret"},
+    },
+)
+check(
+    "settings-rejects-auth-headers",
+    status == 400 and json.loads(body)["error"]["code"] == "VALIDATION_ERROR",
+)
+
+routed = json_request(
+    "PUT",
+    "/studio/api/v1/settings/routing",
+    {
+        "default_profile_id": legacy_profile_id,
+        "tasks": {
+            "writing": legacy_profile_id,
+            "character_development": legacy_profile_id,
+            "scene_extraction": legacy_profile_id,
+            "storyboard_planning": legacy_profile_id,
+        },
+    },
+)
+check(
+    "settings-task-routing-persisted",
+    routed["default_llm_profile_id"] == legacy_profile_id
+    and set(routed["task_assignments"].values()) == {legacy_profile_id},
+)
+
+embedding_profile = json_request(
+    "POST",
+    "/studio/api/v1/settings/embedding-profiles",
+    {
+        "name": "OpenAI Embeddings",
+        "provider": "openai",
+        "protocol": "openai-embeddings",
+        "base_url": "https://api.openai.com/v1",
+        "model_id": "text-embedding-3-small",
+        "api_key": "sk-embedding-secret",
+        "dimensions": 1536,
+        "batch_size": 16,
+        "timeout_seconds": 30,
+    },
+    201,
+)
+check(
+    "settings-embedding-profile-independent",
+    embedding_profile["api_key_configured"] is True
+    and embedding_profile["api_key_masked"]
+    and "api_key" not in embedding_profile,
+)
+embedding_routed = json_request(
+    "PUT",
+    "/studio/api/v1/settings/routing",
+    {"default_embedding_profile_id": embedding_profile["id"]},
+)
+check(
+    "settings-embedding-default-does-not-change-llm-routing",
+    embedding_routed["default_embedding_profile_id"] == embedding_profile["id"]
+    and embedding_routed["default_llm_profile_id"] == legacy_profile_id,
+)
+
 status, page, _ = request("GET", "/studio")
 check(
     "studio-shell",
@@ -895,6 +1031,121 @@ current = json_request(
 )
 check("stale-write-does-not-overwrite", current["content"] == "hello brave world")
 
+extraction = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}/scene-extraction",
+    {
+        "expected_revision": current["revision"],
+        "scope": "selection",
+        "selected_text": "hello brave",
+        "selection_start": 0,
+        "selection_end": 11,
+        "context_before": "",
+        "context_after": " world",
+    },
+)
+check(
+    "scene-extraction-returns-validated-draft",
+    extraction["title"] == "The Locked Workshop"
+    and extraction["protocol"] == "fake"
+    and extraction["source"]["text"] == "hello brave"
+    and extraction["source"]["document_revision"] == current["revision"],
+)
+check(
+    "scene-extraction-matches-existing-character-id",
+    bool(extraction["cast"])
+    and all(
+        entry.get("character_id")
+        in {character_id, studio_character_id}
+        for entry in extraction["cast"]
+    ),
+)
+extraction_cast = [
+    {
+        key: entry[key]
+        for key in (
+            "character_id",
+            "objective",
+            "action",
+            "conflict",
+            "emotional_state",
+            "performance_direction",
+            "subtext",
+        )
+    }
+    for entry in extraction["cast"]
+]
+confirmed_extraction = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}/scene-extractions/confirm",
+    {
+        "title": extraction["title"],
+        "summary": extraction["summary"],
+        "given_circumstances": extraction["given_circumstances"],
+        "dramatic_situation": extraction["dramatic_situation"],
+        "dialogue": extraction["dialogue"],
+        "direction": extraction["direction"],
+        "cast": extraction_cast,
+        "expected_revision": current["revision"],
+        "source_text_snapshot": extraction["source"]["text"],
+        "source_selection_start": extraction["source"]["selection_start"],
+        "source_selection_end": extraction["source"]["selection_end"],
+    },
+    201,
+)
+extracted_scene = confirmed_extraction["scene"]
+check(
+    "scene-extraction-confirmed-with-source-trace",
+    extracted_scene["source_document_id"] == document_id
+    and extracted_scene["source_document_revision"] == current["revision"]
+    and extracted_scene["source_text_snapshot"] == "hello brave"
+    and len(confirmed_extraction["cast"]) >= 1,
+)
+document_scenes = json_request(
+    "GET",
+    f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}/scenes",
+)
+check(
+    "document-lists-extracted-scenes",
+    any(scene["id"] == extracted_scene["id"] for scene in document_scenes),
+)
+unchanged_after_extraction = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}"
+)
+check(
+    "scene-extraction-does-not-modify-document",
+    unchanged_after_extraction["content"] == "hello brave world"
+    and unchanged_after_extraction["revision"] == current["revision"],
+)
+status, body, _ = request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}/scene-extraction",
+    {
+        "expected_revision": current["revision"],
+        "scope": "selection",
+        "selected_text": "not in the document",
+    },
+)
+check(
+    "scene-extraction-rejects-invalid-selection",
+    status == 422 and json.loads(body)["error"]["code"] == "INVALID_SELECTION",
+)
+status, body, _ = request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}/scene-extractions/confirm",
+    {
+        "title": "Cross Workplace Cast",
+        "expected_revision": current["revision"],
+        "source_text_snapshot": "hello brave",
+        "cast": [{"character_id": other_character["id"]}],
+    },
+)
+check(
+    "scene-extraction-confirm-validates-workplace-cast",
+    status == 422
+    and json.loads(body)["error"]["code"] == "INVALID_CAST_CHARACTER",
+)
+
 version = json_request(
     "POST",
     f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}/versions",
@@ -1329,6 +1580,106 @@ for path in (
     assert status == 404, (path, status)
 check("unknown-resources-404", True)
 
+# Prototype sample data is isolated and explicitly illustrative.
+demo = json_request("POST", "/studio/api/v1/demo")
+demo_workplace = demo["workplace"]
+check(
+    "demo-workplace-isolated-and-marked",
+    demo_workplace["title"] == "[SAMPLE] The Last Lamp"
+    and demo_workplace["sample"] is True
+    and demo_workplace["id"] != workplace_id,
+)
+check(
+    "demo-story-cast-scene",
+    len(demo["characters"]) == 3
+    and demo["document"]["revision"] == 1
+    and demo["scene"]["source_document_id"] == demo["document"]["id"]
+    and len(demo["cast"]) == 3,
+)
+check(
+    "demo-storyboard-is-editable-draft",
+    len(demo["storyboard"]["shots"]) == 4
+    and all(not shot["asset_id"] for shot in demo["storyboard"]["shots"])
+    and all(shot["source"] == "sample" for shot in demo["storyboard"]["shots"]),
+)
+demo_asset = demo["asset"]
+check(
+    "demo-image-is-illustrative-not-model-output",
+    demo_asset["generation_metadata"]["illustrative"] is True
+    and demo_asset["generation_metadata"]["generated_by_model"] is False
+    and demo_asset["generation_metadata"]["engine"] == "fake"
+    and any(link["resource_type"] == "scene" for link in demo_asset["links"]),
+)
+status, demo_image, _ = request("GET", demo_asset["file_url"])
+check(
+    "demo-image-file-is-real-png",
+    status == 200 and demo_image.startswith(b"\x89PNG\r\n\x1a\n"),
+)
+demo_document_path = (
+    f"/studio/api/v1/workplaces/{demo_workplace['id']}/documents/"
+    f"{demo['document']['id']}"
+)
+demo_before = json_request("GET", demo_document_path)
+demo_again = json_request("POST", "/studio/api/v1/demo")
+demo_after = json_request("GET", demo_document_path)
+check(
+    "demo-is-idempotent-and-source-unchanged",
+    demo_again["created"] is False
+    and demo_again["workplace"]["id"] == demo_workplace["id"]
+    and demo_after["content"] == demo_before["content"]
+    and demo_after["revision"] == demo_before["revision"] == 1,
+)
+
+acceptance = json_request("GET", "/studio/api/v1/settings/acceptance")
+check(
+    "acceptance-overview-has-three-tasks",
+    {task["task"] for task in acceptance["tasks"]} == {
+        "character_development", "scene_extraction", "storyboard_planning",
+    },
+)
+status, body, _ = request(
+    "POST", "/studio/api/v1/settings/acceptance/character_development", {}
+)
+check(
+    "acceptance-requires-explicit-charge-confirmation",
+    status == 400
+    and json.loads(body)["error"]["code"] == "CONFIRMATION_REQUIRED",
+)
+character_acceptance = json_request(
+    "POST",
+    "/studio/api/v1/settings/acceptance/character_development",
+    {"confirm_charge": True},
+)
+check(
+    "acceptance-character-development-validated",
+    character_acceptance["valid"] is True
+    and character_acceptance["validation"]["draft_persisted"] is False
+    and character_acceptance["elapsed_ms"] >= 0,
+)
+scene_acceptance = json_request(
+    "POST",
+    "/studio/api/v1/settings/acceptance/scene_extraction",
+    {"confirm_charge": True},
+)
+check(
+    "acceptance-scene-extraction-validated",
+    scene_acceptance["valid"] is True
+    and scene_acceptance["validation"]["persisted"] is False
+    and scene_acceptance["validation"]["cast_count"] == 1,
+)
+storyboard_acceptance = json_request(
+    "POST",
+    "/studio/api/v1/settings/acceptance/storyboard_planning",
+    {"confirm_charge": True},
+)
+check(
+    "acceptance-storyboard-validated",
+    storyboard_acceptance["valid"] is True
+    and storyboard_acceptance["validation"]["persisted"] is False
+    and storyboard_acceptance["validation"]["shot_count"] >= 1
+    and storyboard_acceptance["validation"]["character_ids_preserved"] is True,
+)
+
 for path in ("/", "/khala", "/khala/api/system", "/api/version", "/v1/models", "/object_info", "/studio"):
     status, _, _ = request("GET", path)
     assert status == 200, (path, status)
@@ -1351,9 +1702,22 @@ if STATE_PATH:
                 "asset_id": asset_id,
                 "storyboard_asset_id": referenced_generation["shot"]["asset_id"],
                 "storyboard_shot_id": shot_id,
+                "model_profile_id": openai_profile_id,
+                "embedding_profile_id": embedding_profile["id"],
+                "extraction_scene_id": extracted_scene["id"],
+                "extraction_revision": extracted_scene["source_document_revision"],
                 "asset_checksum": asset["checksum"],
                 "revision": unchanged["revision"],
                 "content": unchanged["content"],
+                "demo_workplace_id": demo_workplace["id"],
+                "demo_document_id": demo["document"]["id"],
+                "demo_scene_id": demo["scene"]["id"],
+                "demo_asset_id": demo_asset["id"],
+                "demo_character_ids": [character["id"] for character in demo["characters"]],
+                "demo_storyboard_count": len(demo["storyboard"]["shots"]),
+                "demo_content": demo_before["content"],
+                "demo_revision": demo_before["revision"],
+                "demo_asset_checksum": demo_asset["checksum"],
             },
             handle,
         )

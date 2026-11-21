@@ -17,6 +17,7 @@
     (persist_queue . #f)
     (history_db . "var/history.sqlite3")
     (studio_db . "var/studio.sqlite3")
+    (studio_secrets_file . "var/studio-secrets.json")
     (studio_assets_dir . "var/studio-assets")
     (studio_asset_max_bytes . 4194304)
     (studio_model . "")

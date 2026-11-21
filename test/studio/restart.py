@@ -171,3 +171,97 @@ with opener.open("http://127.0.0.1:" + port + asset["file_url"], timeout=10) as 
 assert content_type.startswith("image/png"), content_type
 assert file_bytes.startswith(b"\x89PNG\r\n\x1a\n"), file_bytes[:16]
 print("ok studio-asset-file-survives-restart")
+
+settings_url = "http://127.0.0.1:" + port + "/studio/api/v1/settings"
+with opener.open(settings_url, timeout=10) as response:
+    settings = json.loads(response.read())["data"]
+
+profile = next(
+    item for item in settings["llm_profiles"]
+    if item["id"] == expected["model_profile_id"]
+)
+assert profile["name"] == "DeepSeek Author Rewrite", profile
+assert profile["model_id"] == "deepseek-chat", profile
+assert profile["api_key_configured"] is True, profile
+assert profile["api_key_masked"], profile
+assert "api_key" not in profile, profile
+embedding_profile = next(
+    item for item in settings["embedding_profiles"]
+    if item["id"] == expected["embedding_profile_id"]
+)
+assert embedding_profile["dimensions"] == 1536, embedding_profile
+assert embedding_profile["api_key_configured"] is True, embedding_profile
+assert settings["default_embedding_profile_id"] == embedding_profile["id"], settings
+print("ok studio-model-settings-survive-restart")
+
+extracted_scene_url = (
+    f"http://127.0.0.1:{port}/studio/api/v1/workplaces/"
+    f"{expected['workplace_id']}/scenes/{expected['extraction_scene_id']}"
+)
+with opener.open(extracted_scene_url, timeout=10) as response:
+    extracted_scene = json.loads(response.read())["data"]
+
+assert extracted_scene["source_document_id"] == expected["document_id"], extracted_scene
+assert (
+    extracted_scene["source_document_revision"] == expected["extraction_revision"]
+), extracted_scene
+assert extracted_scene["source_text_snapshot"] == "hello brave", extracted_scene
+assert extracted_scene["given_circumstances"]["place"].startswith(
+    "A narrow repair workshop"
+), extracted_scene
+print("ok studio-scene-extraction-source-survives-restart")
+
+demo_base = (
+    f"http://127.0.0.1:{port}/studio/api/v1/workplaces/"
+    f"{expected['demo_workplace_id']}"
+)
+with opener.open(
+    demo_base + "/documents/" + expected["demo_document_id"], timeout=10
+) as response:
+    demo_document = json.loads(response.read())["data"]
+assert demo_document["content"] == expected["demo_content"], demo_document
+assert demo_document["revision"] == expected["demo_revision"], demo_document
+
+with opener.open(demo_base + "/characters", timeout=10) as response:
+    demo_characters = json.loads(response.read())["data"]
+assert {character["id"] for character in demo_characters} == set(
+    expected["demo_character_ids"]
+), demo_characters
+
+with opener.open(
+    demo_base + "/scenes/" + expected["demo_scene_id"], timeout=10
+) as response:
+    demo_scene = json.loads(response.read())["data"]
+assert demo_scene["source_document_id"] == expected["demo_document_id"], demo_scene
+
+with opener.open(
+    demo_base + "/scenes/" + expected["demo_scene_id"] + "/cast", timeout=10
+) as response:
+    demo_cast = json.loads(response.read())["data"]
+assert len(demo_cast) == 3, demo_cast
+
+with opener.open(
+    demo_base + "/scenes/" + expected["demo_scene_id"] + "/storyboard", timeout=10
+) as response:
+    demo_storyboard = json.loads(response.read())["data"]
+assert len(demo_storyboard["shots"]) == expected["demo_storyboard_count"], demo_storyboard
+assert all(shot["source"] == "sample" for shot in demo_storyboard["shots"]), demo_storyboard
+
+with opener.open(
+    demo_base + "/assets/" + expected["demo_asset_id"], timeout=10
+) as response:
+    demo_asset = json.loads(response.read())["data"]
+assert demo_asset["checksum"] == expected["demo_asset_checksum"], demo_asset
+assert demo_asset["generation_metadata"]["generated_by_model"] is False, demo_asset
+assert any(
+    link["resource_type"] == "scene"
+    and link["resource_id"] == expected["demo_scene_id"]
+    for link in demo_asset["links"]
+), demo_asset
+
+with opener.open(
+    "http://127.0.0.1:" + port + demo_asset["file_url"], timeout=10
+) as response:
+    demo_image = response.read()
+assert demo_image.startswith(b"\x89PNG\r\n\x1a\n"), demo_image[:16]
+print("ok studio-sample-story-survives-restart")

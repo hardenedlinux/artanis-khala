@@ -10,6 +10,9 @@ const COVER_PALETTE = [
   { color: "#59483A", edge: "#3D3027", foil: "#C1A77C", label: "胡桃棕" },
   { color: "#7A4E48", edge: "#5A3934", foil: "#D0B194", label: "陶土红" },
 ];
+const RESUME_WORKPLACE_KEY = "khala.studio.lastWorkplaceId";
+const RESUME_DOCUMENT_KEY = "khala.studio.lastDocumentId";
+const RESUME_SECTION_KEY = "khala.studio.lastSection";
 
 type Envelope<T> = { data: T };
 type ApiErrorPayload = { error?: { code?: string; message?: string; current_revision?: number } };
@@ -17,6 +20,7 @@ interface Workplace {
   id: string; title: string; description: string; cover_color: string;
   cover_asset_id: string | null; document_count: number; created_at: string;
   updated_at: string; last_opened_at: string | null; archived_at: string | null;
+  sample?: boolean;
 }
 interface StudioDocument {
   id: string; workplace_id: string; parent_id: string | null;
@@ -32,6 +36,7 @@ interface Capabilities {
   api_version: number; storage: string; engine: string; default_model: string | null;
   models: { id: string; name: string; size: number }[]; ai_available: boolean;
   image_generation?: ImageGenerationCapabilities;
+  model_profiles?: { id: string; name: string; model: string; protocol: string }[];
 }
 interface ImageGenerationCapabilities {
   engine: string; available: boolean; reference_images: boolean;
@@ -95,6 +100,9 @@ interface StudioScene {
   dramatic_situation: SceneDramaticSituation;
   dialogue: string; direction: SceneDirection; cast_count: number; storyboard_count: number;
   reference_asset_ids?: string[]; reference_count?: number;
+  source_document_id?: string | null; source_document_version_id?: string | null;
+  source_document_revision?: number | null; source_text_snapshot?: string | null;
+  source_selection_start?: number | null; source_selection_end?: number | null;
   created_at: string; updated_at: string; deleted_at: string | null;
 }
 interface SceneCastEntry {
@@ -113,6 +121,77 @@ interface SceneDraft {
   given_circumstances: SceneGivenCircumstances;
   dramatic_situation: SceneDramaticSituation;
   dialogue: string; direction: SceneDirection;
+}
+
+interface SceneExtractionCast {
+  character_id: string; character_name: string; objective: string; action: string;
+  conflict: string; emotional_state: string; performance_direction: string;
+  subtext: string; sort_order?: number;
+}
+interface SceneExtractionUnresolved { name: string; reason: string }
+interface SceneExtractionSource {
+  document_id: string; document_revision: number; document_version_id: string | null;
+  scope: "selection" | "document"; selection_start: number | null;
+  selection_end: number | null; text: string;
+}
+interface SceneExtractionDraft {
+  title: string; summary: string; given_circumstances: SceneGivenCircumstances;
+  dramatic_situation: SceneDramaticSituation; dialogue: string;
+  direction: SceneDirection; cast: SceneExtractionCast[];
+  unresolved_characters: SceneExtractionUnresolved[];
+  source: SceneExtractionSource; model: string; profile_id: string | null;
+  protocol: string;
+}
+interface SceneExtractionResult { scene: StudioScene; cast: SceneCastEntry[] }
+interface SceneExtractionSourceInput {
+  document_id: string; document_title: string; document_content: string;
+  revision: number; selected_text: string; context_before: string;
+  context_after: string; selection_start: number | null;
+  selection_end: number | null;
+}
+
+type ModelProtocol = "openai-compatible" | "gemini-native" | "anthropic-messages" | "fake";
+interface ModelProfile {
+  id: string; name: string; provider: string; protocol: ModelProtocol;
+  base_url: string; model_id: string; custom_headers: Record<string, string>;
+  timeout_seconds: number; parameters: Record<string, any>;
+  capabilities: Record<string, boolean | number>; enabled: boolean;
+  api_key_configured: boolean; api_key_masked: string | null;
+  created_at: string; updated_at: string;
+}
+interface EmbeddingProfile {
+  id: string; name: string; provider: string; protocol: "openai-embeddings";
+  base_url: string; model_id: string; dimensions: number | null;
+  batch_size: number; timeout_seconds: number; custom_headers: Record<string, string>;
+  enabled: boolean; api_key_configured: boolean; api_key_masked: string | null;
+  created_at: string; updated_at: string;
+}
+interface ModelSettings {
+  llm_profiles: ModelProfile[]; embedding_profiles: EmbeddingProfile[];
+  default_llm_profile_id: string | null; default_embedding_profile_id: string | null;
+  task_assignments: Record<string, string | null>;
+  provider_presets: Record<string, { name: string; protocol: ModelProtocol; base_url: string; model_id: string }>;
+  protocols: Record<string, { label: string; supports_model_list: boolean; supports_streaming: boolean; supports_json: boolean }>;
+  tasks: string[]; legacy: { engine: string; model: string | null; fallback_available: boolean };
+}
+interface AcceptanceTask {
+  task: string; label: string; configured: boolean; profile_id: string | null;
+  profile_name: string | null; model: string | null; protocol: string | null;
+  base_url: string | null; external_provider: boolean; may_incur_charges: boolean;
+}
+interface AcceptanceOverview {
+  tasks: AcceptanceTask[];
+  embedding: {
+    configured: boolean; profile_id: string | null; profile_name: string | null;
+    model: string | null; protocol: string | null; dimensions: number | null;
+    may_incur_charges: boolean;
+  };
+  warning: string; embedding_note: string;
+}
+interface AcceptanceRun {
+  task: string; profile_id: string | null; profile_name: string | null;
+  model: string | null; protocol: string | null; valid: boolean;
+  validation: Record<string, unknown>; elapsed_ms: number; preview: string;
 }
 interface StoryboardShot {
   id: string; number: number; dramatic_beat: string; action: string;
@@ -999,7 +1078,9 @@ function CharacterCanonPanel({ character, outfits, drafts, onTab }: {
   </div>;
 }
 
-function CharactersWorkspace({ workplace, notify }: { workplace: Workplace; notify: (message: string) => void }) {
+function CharactersWorkspace({ workplace, notify, onStartWriting }: {
+  workplace: Workplace; notify: (message: string) => void; onStartWriting: () => void;
+}) {
   const [characters, setCharacters] = React.useState<StudioCharacter[]>([]);
   const [active, setActive] = React.useState<StudioCharacter | null>(null);
   const [draft, setDraft] = React.useState<CharacterDraft | null>(null);
@@ -1236,7 +1317,7 @@ function CharactersWorkspace({ workplace, notify }: { workplace: Workplace; noti
     if (!active || !draft) return <div className="character-empty-detail"><div className="placeholder-ornament">K</div><div className="eyebrow brass-text">CHARACTER STUDIO</div><h2>从一个人物概念开始。</h2><p>写下角色是谁、来自哪里、想要什么，AI 会提出四类身份草稿；你逐项审核后，才成为正式 Canon。</p><button className="tool-button primary" onClick={() => setModal("create")}><Icon name="sparkle"/>创建角色概念</button></div>;
     const current = CHARACTER_SECTIONS.find(section => section.key === sectionKey) || CHARACTER_SECTIONS[0];
     return <>
-      <div className="character-detail-head"><div><div className="eyebrow">CHARACTER STUDIO · {active.role || "UNASSIGNED"}</div><h2>{active.name}</h2><p>{active.summary || active.concept || "这个角色的档案正在形成。"}</p></div><div className="character-detail-actions"><span className={`character-save-state ${hasChanges ? "dirty" : ""}`}>{hasChanges ? "有未保存修改" : "已保存"}</span><button className="head-btn archive-character" disabled={saving} onClick={() => setModal("archive")}>归档角色</button></div></div>
+      <div className="character-detail-head"><div><div className="eyebrow">CHARACTER STUDIO · {active.role || "UNASSIGNED"}</div><h2>{active.name}</h2><p>{active.summary || active.concept || "这个角色的档案正在形成。"}</p></div><div className="character-detail-actions"><span className={`character-save-state ${hasChanges ? "dirty" : ""}`}>{hasChanges ? "有未保存修改" : "已保存"}</span><button className="tool-button character-write-next" onClick={onStartWriting}><Icon name="pen"/>去写作</button><button className="head-btn archive-character" disabled={saving} onClick={() => setModal("archive")}>归档角色</button></div></div>
       <div className="character-studio-tabs">{CHARACTER_TABS.map(item => <button key={item.key} className={tab === item.key ? "active" : ""} onClick={() => setTab(item.key)}><Icon name={item.icon}/><span>{item.title}</span><small>{item.en}</small></button>)}</div>
       {tab === "overview" && <CharacterOverviewPanel character={active} draft={draft} dirty={metaDirty} saving={saving} onEdit={editMeta} onSave={() => void saveMetadata()} onTab={setTab}/>}
       {tab === "identity" && <CharacterIdentityPanel character={active} draft={draft} sectionKey={current.key} setSectionKey={setSectionKey} dirtySections={dirtySections} saving={saving} aiBusy={aiBusy} drafts={aiDrafts} onEdit={editIdentity} onSave={(key) => void saveIdentity(key)} onRegenerate={(key) => void regenerateIdentity(key)} onDraftEdit={editDraft} onDraftSave={(key) => void saveDraft(key)} onApply={(key) => void applyDraft(key)} onDiscard={(key) => void discardDraft(key)}/>}
@@ -1334,11 +1415,12 @@ function ShotReferencePanel({ shot, cast, outfitsByCharacter }: {
   </section>;
 }
 
-function StoryboardWorkspace({ workplace, scene, cast, outfitsByCharacter, board, onChange, onBack, onDirtyChange, notify }: {
+function StoryboardWorkspace({ workplace, scene, cast, outfitsByCharacter, board, onChange, onBack, onDirtyChange, notify, onOpenAsset }: {
   workplace: Workplace; scene: StudioScene; cast: SceneCastDraft[];
   outfitsByCharacter: Record<string, CharacterOutfit[]>; board: SceneStoryboard;
   onChange: (board: SceneStoryboard) => void; onBack: () => void;
   onDirtyChange: (dirty: boolean) => void; notify: (message: string) => void;
+  onOpenAsset: (assetId: string) => void;
 }) {
   const [shots, setShots] = React.useState<StoryboardShot[]>(board.shots);
   const [dirty, setDirty] = React.useState(false);
@@ -1543,6 +1625,7 @@ function StoryboardWorkspace({ workplace, scene, cast, outfitsByCharacter, board
         {shot.reference_usage && <p className="shot-reference-summary">{shot.reference_usage.applied ? `参考图 ${shot.reference_usage.references.length} 张 · 已传入图像字节` : shot.reference_usage.references.length ? `参考图 ${shot.reference_usage.references.length} 张 · 当前仅文本生成` : "本次生成未使用参考图"}</p>}
         <div className="shot-card-actions">
           <button className="quiet-button" onClick={(event: any) => { event.stopPropagation(); setEditingId(shot.id); }}>编辑分镜</button>
+          {shot.asset_id && <button className="quiet-button" onClick={(event: any) => { event.stopPropagation(); onOpenAsset(shot.asset_id!); }}>在 Assets 中查看</button>}
           <button className="tool-button primary" disabled={!board.generation_available || !!generatingId || saving || regenerating} onClick={(event: any) => { event.stopPropagation(); void generateImage(shot.id); }}>{generatingId === shot.id ? "正在绘制…" : shot.file_url ? "重新生成" : "Generate Image"}</button>
         </div>
       </div>
@@ -1568,13 +1651,19 @@ function StoryboardWorkspace({ workplace, scene, cast, outfitsByCharacter, board
         })}</div>}
         <label className="field-label shot-prompt-field">Image generation prompt<textarea rows={10} value={editing.image_prompt} onChange={(event: any) => updateShot(editing.id, { image_prompt: event.target.value })}/><small>Prompt 已从场景、Cast、Visual Canon 和参考 Assets 组合。可编辑，但不要把未获作者批准的永久外观变化写成 Canon。</small></label>
         <ShotReferencePanel shot={editing} cast={cast} outfitsByCharacter={outfitsByCharacter}/>
-        <div className="shot-editor-generate"><button className="tool-button primary" disabled={!board.generation_available || !!generatingId || saving || regenerating} onClick={() => void generateImage(editing.id)}>{generatingId === editing.id ? "正在绘制…" : editing.file_url ? "重新生成这一格" : "Generate Image"}</button><span>{editing.file_url ? "新画面会作为新的 Asset 保存，旧画面仍保留。" : "只有明确点击才会生成。修改会先保存，生成不会自动改写分镜或 Character Canon。"}</span></div>
+        <div className="shot-editor-generate"><button className="tool-button primary" disabled={!board.generation_available || !!generatingId || saving || regenerating} onClick={() => void generateImage(editing.id)}>{generatingId === editing.id ? "正在绘制…" : editing.file_url ? "重新生成这一格" : "Generate Image"}</button>{editing.asset_id && <button className="quiet-button" onClick={() => onOpenAsset(editing.asset_id!)}>在 Assets 中查看</button>}<span>{editing.file_url ? "新画面会作为新的 Asset 保存，旧画面仍保留。" : "只有明确点击才会生成。修改会先保存，生成不会自动改写分镜或 Character Canon。"}</span></div>
       </div>
     </Modal>}
   </div>;
 }
 
-function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: (message: string) => void }) {
+function ScenesWorkspace({ workplace, notify, launch, onLaunchConsumed, onOpenSourceDocument, onOpenAsset }: {
+  workplace: Workplace; notify: (message: string) => void;
+  launch?: { sceneId: string; storyboard: boolean; nonce: number } | null;
+  onLaunchConsumed?: () => void;
+  onOpenSourceDocument?: (documentId: string) => void;
+  onOpenAsset: (assetId: string) => void;
+}) {
   const [scenes, setScenes] = React.useState<StudioScene[]>([]);
   const [characters, setCharacters] = React.useState<StudioCharacter[]>([]);
   const [active, setActive] = React.useState<StudioScene | null>(null);
@@ -1595,6 +1684,7 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
   const [modal, setModal] = React.useState<"create" | "delete" | null>(null);
   const [newTitle, setNewTitle] = React.useState("");
   const [newSummary, setNewSummary] = React.useState("");
+  const launchHandledRef = React.useRef<number | null>(null);
 
   function installScene(scene: StudioScene, entries: SceneCastEntry[]) {
     setActive(scene);
@@ -1670,6 +1760,47 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
     });
     return () => { alive = false; };
   }, [workplace.id]);
+
+  React.useEffect(() => {
+    if (!launch || loading || launchHandledRef.current === launch.nonce) return;
+    const target = scenes.find(scene => scene.id === launch.sceneId);
+    if (!target) {
+      onLaunchConsumed?.();
+      return;
+    }
+    let alive = true;
+    launchHandledRef.current = launch.nonce;
+    setDetailLoading(true); setError("");
+    (async () => {
+      try {
+        const [scene, entries] = await Promise.all([
+          api<StudioScene>(`/workplaces/${workplace.id}/scenes/${target.id}`),
+          api<SceneCastEntry[]>(`/workplaces/${workplace.id}/scenes/${target.id}/cast`),
+        ]);
+        if (!alive) return;
+        installScene(scene, entries);
+        if (launch.storyboard) {
+          const drafts = entries.map(castDraft);
+          await loadCharacterOutfits(drafts);
+          const storyboardResult = target.storyboard_count > 0
+            ? await api<SceneStoryboard>(`/workplaces/${workplace.id}/scenes/${target.id}/storyboard`)
+            : await api<SceneStoryboard>(`/workplaces/${workplace.id}/scenes/${target.id}/storyboard`, { method: "POST", body: {} });
+          if (!alive) return;
+          setStoryboard(storyboardResult);
+          setStoryboardOpen(true);
+          setStoryboardDirty(false);
+          setActive(previous => previous ? { ...previous, storyboard_count: storyboardResult.shots.length } : previous);
+          setScenes(previous => previous.map(item => item.id === scene.id ? { ...item, storyboard_count: storyboardResult.shots.length } : item));
+        }
+      } catch (cause: any) {
+        if (alive) setError(cause?.message || "无法打开新建 Scene 的 Storyboard");
+      } finally {
+        if (alive) setDetailLoading(false);
+        onLaunchConsumed?.();
+      }
+    })();
+    return () => { alive = false; };
+  }, [launch?.nonce, loading, scenes.length]);
 
   function editScene(update: (previous: SceneDraft) => SceneDraft) {
     setDraft(previous => previous ? update(previous) : previous);
@@ -1902,8 +2033,13 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
     return <div className="scene-detail-body">
       <div className="scene-detail-head"><div><div className="eyebrow">SCENE {String(scenes.findIndex(scene => scene.id === active.id) + 1).padStart(2, "0")}</div><input className="scene-title-input" value={draft.title} maxLength={512} onChange={(event: any) => editScene(previous => ({ ...previous, title: event.target.value }))}/><label className="scene-status-field"><span>状态</span><select value={draft.status} onChange={(event: any) => editScene(previous => ({ ...previous, status: event.target.value as StudioScene["status"] }))}><option value="draft">草稿</option><option value="ready">可排演</option><option value="final">定稿</option></select></label></div><div className="scene-detail-actions"><span className={sceneDirty ? "scene-dirty" : ""}>{sceneDirty ? "场景有未保存修改" : "场景已保存"}</span><button className="head-btn delete-scene" onClick={() => setModal("delete")}>归档场景</button><button className="tool-button storyboard-cta" disabled={storyboardLoading} onClick={() => void openStoryboard(!(active.storyboard_count > 0))}><Icon name="scene"/>{active.storyboard_count > 0 ? "Open Storyboard" : "Create Storyboard"}</button><button className="tool-button primary" disabled={savingScene || !sceneDirty} onClick={() => void saveScene()}>{savingScene ? "保存中…" : "保存场景"}</button></div></div>
       <label className="scene-summary-field"><span>一句摘要</span><textarea rows={2} value={draft.summary} onChange={(event: any) => editScene(previous => ({ ...previous, summary: event.target.value }))} placeholder="用一句话说明这一场正在发生什么。"/></label>
+      {active.source_document_id && <section className="scene-source-trace">
+        <div className="scene-source-head"><div><div className="eyebrow">SOURCE TRACE</div><h3>从正文提取</h3><p>来源是创建时的文本快照，不会随着 Document 后续修改而自动同步。</p></div>{onOpenSourceDocument && <button className="tool-button" onClick={() => onOpenSourceDocument(active.source_document_id!)}><Icon name="pen"/>返回来源 Document</button>}</div>
+        <div className="scene-source-meta"><span>DOCUMENT <strong>{active.source_document_id}</strong></span><span>REVISION <strong>{active.source_document_revision ?? "—"}</strong></span><span>RANGE <strong>{active.source_selection_start != null && active.source_selection_end != null ? `${active.source_selection_start}–${active.source_selection_end}` : "由 Document 快照定位"}</strong></span></div>
+        {active.source_text_snapshot && <details><summary>查看来源文本快照</summary><pre>{active.source_text_snapshot}</pre></details>}
+      </section>}
       <section className="storyboard-invite">
-        <div><div className="eyebrow">FROM STAGE TO SCREEN</div><h3>{active.storyboard_count > 0 ? "这一场已经有分镜。" : "把这一场戏变成 4 个可拍摄的镜头。"}</h3><p>自动收集既定情境、冲突与 Turn、Cast 的目标和情绪、Character Visual Canon，以及 Scene 与角色已关联的参考 Assets。</p></div>
+        <div><div className="eyebrow">FROM STAGE TO SCREEN</div><h3>{active.storyboard_count > 0 ? "这一场已经有分镜。" : "让引擎按这场戏的戏剧推进决定镜头数量。"}</h3><p>自动收集既定情境、冲突与 Turn、Cast 的目标和情绪、Character Visual Canon，以及 Scene 与角色已关联的参考 Assets。</p></div>
         <button className="storyboard-invite-button" disabled={storyboardLoading} onClick={() => void openStoryboard(!(active.storyboard_count > 0))}><Icon name="scene"/><span>{storyboardLoading ? "正在整理分镜…" : active.storyboard_count > 0 ? "Open Storyboard" : "Create Storyboard"}</span><small>{active.storyboard_count > 0 ? `${active.storyboard_count} 个镜头 · 继续制作` : "无需重复填写角色与场景资料"}</small></button>
       </section>
       <section className="scene-section"><div className="scene-section-head"><div className="eyebrow">GIVEN CIRCUMSTANCES</div><h3>既定情境</h3><p>人物无法选择、但必须回应的条件。</p></div><div className="scene-field-grid">{SCENE_GIVEN_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={draft.given_circumstances[field.key]} onChange={(event: any) => editGiven(field.key, event.target.value)}/></label>)}</div></section>
@@ -1921,7 +2057,7 @@ function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
     <div className="book-topline"><div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace.title}</span><span className="top-separator">/</span><span className="document-crumb">SCENES &amp; CASTING</span></div><div className="book-actions"><span className="character-count">{scenes.length} 个场景</span><button className="head-btn" onClick={() => { if ((!sceneDirty && !castDirty && !storyboardDirty) || window.confirm("当前场景还有未保存修改，建立新场景会放弃它们。继续吗？")) setModal("create"); }}><Icon name="plus"/>新建场景</button></div></div>
     <div className="scene-workspace">
       <aside className="scene-index"><div className="character-index-head"><div className="eyebrow brass-text">THE STAGE BOOK</div><h1>场景与 Casting</h1><p>把人物放进具体情境，看他们如何行动、碰撞和改变。</p></div>{error && <div className="character-error">{error}<button onClick={() => setError("")}>关闭</button></div>}{renderSceneList()}</aside>
-      <main className="scene-detail">{storyboardOpen && storyboard && active ? <StoryboardWorkspace workplace={workplace} scene={active} cast={cast} outfitsByCharacter={characterOutfits} board={storyboard} onChange={(next) => { setStoryboard(next); setActive(previous => previous ? { ...previous, storyboard_count: next.shots.length } : previous); setScenes(previous => previous.map(scene => scene.id === active.id ? { ...scene, storyboard_count: next.shots.length } : scene)); }} onBack={() => { setStoryboardOpen(false); setStoryboardDirty(false); }} onDirtyChange={setStoryboardDirty} notify={notify}/> : storyboardLoading ? <div className="character-state scene-detail-state"><span className="thinking-mark">✦</span><p>正在从场景与角色档案整理分镜……</p></div> : renderSceneDetail()}</main>
+      <main className="scene-detail">{storyboardOpen && storyboard && active ? <StoryboardWorkspace workplace={workplace} scene={active} cast={cast} outfitsByCharacter={characterOutfits} board={storyboard} onChange={(next) => { setStoryboard(next); setActive(previous => previous ? { ...previous, storyboard_count: next.shots.length } : previous); setScenes(previous => previous.map(scene => scene.id === active.id ? { ...scene, storyboard_count: next.shots.length } : scene)); }} onBack={() => { setStoryboardOpen(false); setStoryboardDirty(false); }} onDirtyChange={setStoryboardDirty} notify={notify} onOpenAsset={onOpenAsset}/> : storyboardLoading ? <div className="character-state scene-detail-state"><span className="thinking-mark">✦</span><p>正在从场景与角色档案整理分镜……</p></div> : renderSceneDetail()}</main>
     </div>
     {modal === "create" && <Modal title="建立新场景" eyebrow="A MOMENT ON STAGE" onClose={() => { setModal(null); setError(""); }} actions={<><button className="quiet-button" onClick={() => setModal(null)}>取消</button><button className="confirm-button" disabled={!newTitle.trim() || savingScene} onClick={() => void createScene()}>{savingScene ? "创建中…" : "建立场景"}</button></>}>
       <p className="modal-intro">先给这个具体时刻一个名字。既定情境、Cast、台词和调度都可以之后逐步补全。</p>
@@ -2076,7 +2212,9 @@ function SceneReferencePanel({ workplaceId, scene, onChange, notify }: {
   </section>;
 }
 
-function AssetsWorkspace({ workplace, notify }: { workplace: Workplace; notify: (message: string) => void }) {
+function AssetsWorkspace({ workplace, notify, focusAssetId }: {
+  workplace: Workplace; notify: (message: string) => void; focusAssetId?: string | null;
+}) {
   const [assets, setAssets] = React.useState<StudioAsset[]>([]);
   const [active, setActive] = React.useState<StudioAsset | null>(null);
   const [draft, setDraft] = React.useState<AssetDraft | null>(null);
@@ -2100,13 +2238,14 @@ function AssetsWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
         if (!alive) return;
         setAssets(list);
         if (!list.length) return;
-        const detail = await api<StudioAsset>(`/workplaces/${workplace.id}/assets/${list[0].id}`);
+        const target = list.find(asset => asset.id === focusAssetId) || list[0];
+        const detail = await api<StudioAsset>(`/workplaces/${workplace.id}/assets/${target.id}`);
         if (alive) { setActive(detail); setDraft(assetDraft(detail)); }
       })
       .catch((cause: any) => { if (alive) setError(cause?.message || "无法读取创作资源库"); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [workplace.id]);
+  }, [workplace.id, focusAssetId]);
 
   const dirty = !!(active && draft && (
     draft.name !== active.name || draft.description !== active.description ||
@@ -2260,9 +2399,710 @@ function AssetsWorkspace({ workplace, notify }: { workplace: Workplace; notify: 
   </div>;
 }
 
+const MODEL_TASK_INFO = [
+  { key: "writing", label: "Writing", zh: "写作、灵感与续写" },
+  { key: "character_development", label: "Character Development", zh: "角色人设草稿" },
+  { key: "scene_extraction", label: "Scene Extraction", zh: "正文提取场景" },
+  { key: "storyboard_planning", label: "Storyboard Planning", zh: "场景转分镜" },
+];
+
+const MODEL_CAPABILITY_INFO = [
+  { key: "temperature", label: "Temperature" },
+  { key: "top_p", label: "Top P" },
+  { key: "streaming", label: "Streaming" },
+  { key: "json", label: "JSON Output" },
+  { key: "reasoning", label: "Reasoning" },
+];
+
+interface ModelProfileDraft {
+  id?: string; name: string; provider: string; protocol: ModelProtocol;
+  base_url: string; model_id: string; api_key: string; headers: string;
+  timeout_seconds: number; enabled: boolean;
+  temperature: string; top_p: string; max_output_tokens: string;
+  stream: boolean; json_mode: boolean; reasoning_effort: string;
+  context_window: string; max_output_tokens_limit: string;
+  capabilities: Record<string, boolean | undefined>;
+}
+
+interface EmbeddingProfileDraft {
+  id?: string; name: string; provider: string; base_url: string; model_id: string;
+  api_key: string; dimensions: string; batch_size: number; timeout_seconds: number;
+  headers: string; enabled: boolean;
+}
+
+function defaultCapabilities(protocol: ModelProtocol): Record<string, boolean> {
+  if (protocol === "anthropic-messages") return { temperature: true, top_p: true, streaming: true, json: false };
+  return { temperature: true, top_p: true, streaming: true, json: true };
+}
+
+function blankModelDraft(protocol: ModelProtocol = "openai-compatible"): ModelProfileDraft {
+  return {
+    name: "", provider: "custom", protocol, base_url: "", model_id: "", api_key: "",
+    headers: "{}", timeout_seconds: 60, enabled: true,
+    temperature: "0.7", top_p: "1", max_output_tokens: "2048",
+    stream: true, json_mode: true, reasoning_effort: "",
+    context_window: "", max_output_tokens_limit: "",
+    capabilities: defaultCapabilities(protocol),
+  };
+}
+
+function modelDraftFrom(profile: ModelProfile): ModelProfileDraft {
+  const parameters = profile.parameters || {};
+  const capabilities = profile.capabilities || {};
+  return {
+    id: profile.id, name: profile.name, provider: profile.provider,
+    protocol: profile.protocol, base_url: profile.base_url, model_id: profile.model_id,
+    api_key: "", headers: JSON.stringify(profile.custom_headers || {}, null, 2),
+    timeout_seconds: profile.timeout_seconds || 60, enabled: profile.enabled,
+    temperature: parameters.temperature != null ? String(parameters.temperature) : "",
+    top_p: parameters.top_p != null ? String(parameters.top_p) : "",
+    max_output_tokens: parameters.max_output_tokens != null ? String(parameters.max_output_tokens) : "",
+    stream: parameters.stream === true,
+    json_mode: parameters.format === "json",
+    reasoning_effort: parameters.reasoning_effort != null ? String(parameters.reasoning_effort) : "",
+    context_window: capabilities.context_window != null ? String(capabilities.context_window) : "",
+    max_output_tokens_limit: capabilities.max_output_tokens != null ? String(capabilities.max_output_tokens) : "",
+    capabilities: Object.fromEntries(MODEL_CAPABILITY_INFO.flatMap(item => {
+      const value = capabilities[item.key];
+      return typeof value === "boolean" ? [[item.key, value]] : [];
+    })),
+  };
+}
+
+function parsedHeaders(text: string): Record<string, string> {
+  if (!text.trim()) return {};
+  const value = JSON.parse(text);
+  if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("自定义 Headers 必须是 JSON 对象");
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, String(item)]));
+}
+
+function modelProfilePayload(draft: ModelProfileDraft) {
+  const parameters: Record<string, any> = {};
+  if (draft.temperature.trim() !== "") parameters.temperature = Number(draft.temperature);
+  if (draft.top_p.trim() !== "") parameters.top_p = Number(draft.top_p);
+  if (draft.max_output_tokens.trim() !== "") parameters.max_output_tokens = Number(draft.max_output_tokens);
+  parameters.stream = draft.stream;
+  if (draft.json_mode) parameters.format = "json";
+  if (draft.reasoning_effort.trim()) parameters.reasoning_effort = draft.reasoning_effort.trim();
+  const capabilities: Record<string, any> = { ...draft.capabilities };
+  if (draft.context_window.trim()) capabilities.context_window = Number(draft.context_window);
+  if (draft.max_output_tokens_limit.trim()) capabilities.max_output_tokens = Number(draft.max_output_tokens_limit);
+  return {
+    name: draft.name.trim(), provider: draft.provider.trim() || "custom",
+    protocol: draft.protocol, base_url: draft.base_url.trim(), model_id: draft.model_id.trim(),
+    api_key: draft.api_key.trim() || undefined,
+    custom_headers: parsedHeaders(draft.headers), timeout_seconds: draft.timeout_seconds,
+    parameters, capabilities, enabled: draft.enabled,
+  };
+}
+
+function blankEmbeddingDraft(): EmbeddingProfileDraft {
+  return {
+    name: "", provider: "custom", base_url: "", model_id: "", api_key: "",
+    dimensions: "", batch_size: 16, timeout_seconds: 60, headers: "{}", enabled: true,
+  };
+}
+
+function embeddingDraftFrom(profile: EmbeddingProfile): EmbeddingProfileDraft {
+  return {
+    id: profile.id, name: profile.name, provider: profile.provider,
+    base_url: profile.base_url, model_id: profile.model_id, api_key: "",
+    dimensions: profile.dimensions != null ? String(profile.dimensions) : "",
+    batch_size: profile.batch_size || 16, timeout_seconds: profile.timeout_seconds || 60,
+    headers: JSON.stringify(profile.custom_headers || {}, null, 2), enabled: profile.enabled,
+  };
+}
+
+function embeddingProfilePayload(draft: EmbeddingProfileDraft) {
+  return {
+    name: draft.name.trim(), provider: draft.provider.trim() || "custom",
+    protocol: "openai-embeddings", base_url: draft.base_url.trim(), model_id: draft.model_id.trim(),
+    api_key: draft.api_key.trim() || undefined,
+    dimensions: draft.dimensions.trim() ? Number(draft.dimensions) : null,
+    batch_size: draft.batch_size, timeout_seconds: draft.timeout_seconds,
+    custom_headers: parsedHeaders(draft.headers), enabled: draft.enabled,
+  };
+}
+
+function ManualAcceptancePanel({ notify }: { notify: (message: string) => void }) {
+  const [overview, setOverview] = React.useState<AcceptanceOverview | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [busyTask, setBusyTask] = React.useState("");
+  const [error, setError] = React.useState("");
+  const [results, setResults] = React.useState<Record<string, AcceptanceRun>>({});
+
+  React.useEffect(() => {
+    let alive = true;
+    api<AcceptanceOverview>("/settings/acceptance")
+      .then(data => { if (alive) setOverview(data); })
+      .catch((cause: any) => { if (alive) setError(cause?.message || "无法读取最小验收配置"); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, []);
+
+  async function runTask(task: AcceptanceTask) {
+    if (busyTask) return;
+    if (task.may_incur_charges && !window.confirm(
+      `本次将向 ${task.profile_name || task.protocol || "外部服务"} 发送一次真实请求。\n\nModel: ${task.model || "(未配置)"}\n这可能产生费用，且不会自动重试。继续吗？`
+    )) return;
+    setBusyTask(task.task); setError("");
+    try {
+      const result = await api<AcceptanceRun>(`/settings/acceptance/${task.task}`, {
+        method: "POST",
+        body: { confirm_charge: true },
+      });
+      setResults(previous => ({ ...previous, [task.task]: result }));
+      notify(`${task.label} 验收通过；结果仅用于校验，没有写入创作数据`);
+    } catch (cause: any) {
+      setError(`${task.label}：${cause?.code || "ACCEPTANCE_FAILED"} · ${cause?.message || "请求失败"}`);
+    } finally {
+      setBusyTask("");
+    }
+  }
+
+  return <section className="settings-panel acceptance-panel">
+    <div className="settings-panel-head"><div><div className="eyebrow">MANUAL MODEL ACCEPTANCE</div><h2>最小真实模型验收</h2><p>这不是批量测试。每次只执行一个任务、发送一次请求，并明确显示当前 Profile、Model 与协议；不会自动重试或遍历模型。</p></div><span className="acceptance-safety-stamp">手动触发 · NO RETRY</span></div>
+    {loading ? <div className="acceptance-state">正在核对任务路由……</div> : error && !overview ? <div className="character-error">{error}<button onClick={() => setError("")}>关闭</button></div> : overview ? <>
+      <p className="acceptance-warning">{overview.warning}</p>
+      {error && <div className="character-error settings-error">{error}<button onClick={() => setError("")}>关闭</button></div>}
+      <div className="acceptance-task-grid">{overview.tasks.map(task => {
+        const result = results[task.task];
+        return <article className={`acceptance-task ${task.configured ? "" : "unconfigured"}`} key={task.task}>
+          <div className="acceptance-task-head"><div><span>{task.label.toUpperCase()}</span><h3>{task.label}</h3></div><em className={task.may_incur_charges ? "paid" : ""}>{task.may_incur_charges ? "POSSIBLE CHARGE" : "LOCAL / FAKE"}</em></div>
+          <dl><div><dt>Profile</dt><dd>{task.profile_name || "Legacy fallback"}</dd></div><div><dt>Model</dt><dd>{task.model || "(not configured)"}</dd></div><div><dt>Protocol</dt><dd>{task.protocol || "(unknown)"}</dd></div></dl>
+          <button className="tool-button" disabled={!!busyTask || !task.configured} onClick={() => void runTask(task)}>{busyTask === task.task ? "正在执行一次请求…" : `运行 ${task.label}`}</button>
+          {result && <div className="acceptance-result"><strong>VALID · {result.elapsed_ms} ms</strong><pre>{JSON.stringify(result.validation, null, 2)}\n\n{result.preview}</pre></div>}
+        </article>;
+      })}</div>
+      <div className="acceptance-embedding-note"><strong>Embedding</strong><span>{overview.embedding_note}</span><small>{overview.embedding.configured ? `${overview.embedding.profile_name || "Configured"} · ${overview.embedding.model || "model unset"}` : "尚未配置独立 Embedding Profile；不会影响写作、角色或场景。"}</small></div>
+    </> : null}
+  </section>;
+}
+
+function SettingsWorkspace({ workplace, capabilities, editorFontSize, setEditorFontSize, defaultCover, setDefaultCover, notify }: {
+  workplace: Workplace; capabilities: Capabilities | null; editorFontSize: number;
+  setEditorFontSize: (value: number) => void; defaultCover: string;
+  setDefaultCover: (value: string) => void; notify: (message: string) => void;
+}) {
+  const [settings, setSettings] = React.useState<ModelSettings | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState("");
+  const [profileDraft, setProfileDraft] = React.useState<ModelProfileDraft>(blankModelDraft());
+  const [profileBusy, setProfileBusy] = React.useState(false);
+  const [testResult, setTestResult] = React.useState("");
+  const [discoveredModels, setDiscoveredModels] = React.useState<{ id: string; name: string }[]>([]);
+  const [presetToAdd, setPresetToAdd] = React.useState("custom-openai");
+  const [routingDraft, setRoutingDraft] = React.useState<Record<string, string>>({});
+  const [defaultDraft, setDefaultDraft] = React.useState("");
+  const [routingBusy, setRoutingBusy] = React.useState(false);
+  const [embeddingDraft, setEmbeddingDraft] = React.useState<EmbeddingProfileDraft>(blankEmbeddingDraft());
+  const [embeddingBusy, setEmbeddingBusy] = React.useState(false);
+  const [embeddingTestText, setEmbeddingTestText] = React.useState("Khala Studio embedding connection test.");
+  const [embeddingResult, setEmbeddingResult] = React.useState("");
+
+  function installSettings(next: ModelSettings, preferredId?: string) {
+    setSettings(next);
+    const selected = next.llm_profiles.find(profile => profile.id === (preferredId || profileDraft.id))
+      || next.llm_profiles[0];
+    setProfileDraft(selected ? modelDraftFrom(selected) : blankModelDraft());
+    setDefaultDraft(next.default_llm_profile_id || "");
+    setRoutingDraft(Object.fromEntries(next.tasks.map(task => [task, next.task_assignments[task] || ""])));
+    const embedding = next.embedding_profiles.find(profile => profile.id === embeddingDraft.id)
+      || next.embedding_profiles[0];
+    setEmbeddingDraft(embedding ? embeddingDraftFrom(embedding) : blankEmbeddingDraft());
+  }
+
+  async function loadSettings(preferredId?: string) {
+    setLoading(true); setError("");
+    try {
+      installSettings(await api<ModelSettings>("/settings"), preferredId);
+    } catch (cause: any) {
+      setError(cause?.message || "无法读取模型设置");
+    } finally { setLoading(false); }
+  }
+
+  React.useEffect(() => { void loadSettings(); }, []);
+
+  function choosePreset(key: string) {
+    if (!settings) return;
+    const preset = settings.provider_presets[key];
+    if (!preset) return;
+    const draft = blankModelDraft(preset.protocol);
+    setProfileDraft({
+      ...draft, provider: key.replace(/^custom-/, ""), name: preset.name,
+      protocol: preset.protocol, base_url: preset.base_url, model_id: preset.model_id,
+    });
+    setTestResult(""); setDiscoveredModels([]); setError("");
+  }
+
+  function selectProfile(profile: ModelProfile) {
+    setProfileDraft(modelDraftFrom(profile));
+    setTestResult(""); setDiscoveredModels([]); setError("");
+  }
+
+  function changeProtocol(protocol: ModelProtocol) {
+    setProfileDraft(previous => ({
+      ...previous, protocol, capabilities: defaultCapabilities(protocol),
+      json_mode: protocol !== "anthropic-messages",
+    }));
+  }
+
+  async function saveProfile() {
+    if (!profileDraft.name.trim()) { setError("Profile 名称不能为空"); return; }
+    if (profileDraft.protocol !== "fake" && (!profileDraft.base_url.trim() || !profileDraft.model_id.trim())) {
+      setError("Base URL 与 Model ID 都必须填写；模型列表获取失败时也可以手动填写。"); return;
+    }
+    setProfileBusy(true); setError("");
+    try {
+      const payload = modelProfilePayload(profileDraft);
+      const saved = await api<ModelProfile>(
+        profileDraft.id ? `/settings/model-profiles/${profileDraft.id}` : "/settings/model-profiles",
+        { method: profileDraft.id ? "PUT" : "POST", body: payload },
+      );
+      await loadSettings(saved.id);
+      notify(profileDraft.id ? "模型 Profile 已保存；密钥不会通过读取接口返回。" : "模型 Profile 已建立");
+    } catch (cause: any) {
+      setError(cause?.message || "保存模型 Profile 失败");
+    } finally { setProfileBusy(false); }
+  }
+
+  async function deleteProfile() {
+    if (!profileDraft.id || !window.confirm(`归档“${profileDraft.name}”？已分配到该 Profile 的任务会回退到全局默认。`)) return;
+    setProfileBusy(true); setError("");
+    try {
+      await api(`/settings/model-profiles/${profileDraft.id}`, { method: "DELETE" });
+      await loadSettings();
+      notify("模型 Profile 已归档");
+    } catch (cause: any) {
+      setError(cause?.message || "归档模型 Profile 失败");
+    } finally { setProfileBusy(false); }
+  }
+
+  async function testProfile() {
+    if (!profileDraft.id) { setError("请先保存 Profile，再测试连接。"); return; }
+    setProfileBusy(true); setError(""); setTestResult("正在测试已保存的 Profile…");
+    try {
+      const result = await api<any>(`/settings/model-profiles/${profileDraft.id}/test`, { method: "POST", body: {} });
+      setTestResult(`连接成功 · ${result.model || profileDraft.model_id} · ${result.protocol} · ${result.elapsed_ms} ms\n${result.preview || ""}`);
+    } catch (cause: any) {
+      setTestResult("");
+      setError(`${cause?.code || "TEST_FAILED"}：${cause?.message || "连接测试失败"}`);
+    } finally { setProfileBusy(false); }
+  }
+
+  async function discoverModels() {
+    if (!profileDraft.id) { setError("请先保存 Profile，再获取模型列表；也可以直接手动填写 Model ID。"); return; }
+    setProfileBusy(true); setError("");
+    try {
+      const result = await api<{ models: { id: string; name: string }[] }>(`/settings/model-profiles/${profileDraft.id}/models`, { method: "POST", body: {} });
+      setDiscoveredModels(result.models || []);
+      if (!profileDraft.model_id && result.models?.length) {
+        setProfileDraft(previous => ({ ...previous, model_id: result.models[0].id }));
+      }
+      notify(`读取到 ${result.models?.length || 0} 个模型；仍可手动填写任意模型 ID`);
+    } catch (cause: any) {
+      setError(`模型列表读取失败，可继续手动填写：${cause?.message || "未知错误"}`);
+    } finally { setProfileBusy(false); }
+  }
+
+  async function saveRouting() {
+    setRoutingBusy(true); setError("");
+    try {
+      const tasks = Object.fromEntries(MODEL_TASK_INFO.map(task => [task.key, routingDraft[task.key] || null]));
+      const next = await api<ModelSettings>("/settings/routing", {
+        method: "PUT",
+        body: { default_profile_id: defaultDraft || null, tasks },
+      });
+      setSettings(next);
+      setDefaultDraft(next.default_llm_profile_id || "");
+      setRoutingDraft(Object.fromEntries(next.tasks.map(task => [task, next.task_assignments[task] || ""])));
+      notify("模型任务分配已保存");
+    } catch (cause: any) {
+      setError(cause?.message || "保存模型任务分配失败");
+    } finally { setRoutingBusy(false); }
+  }
+
+  function selectEmbedding(profile: EmbeddingProfile) {
+    setEmbeddingDraft(embeddingDraftFrom(profile));
+    setEmbeddingResult(""); setError("");
+  }
+
+  async function saveEmbedding() {
+    if (!embeddingDraft.name.trim() || !embeddingDraft.base_url.trim() || !embeddingDraft.model_id.trim()) {
+      setError("Embedding Profile 的名称、Base URL 和 Model ID 都必须填写。"); return;
+    }
+    setEmbeddingBusy(true); setError("");
+    try {
+      const payload = embeddingProfilePayload(embeddingDraft);
+      const saved = await api<EmbeddingProfile>(
+        embeddingDraft.id ? `/settings/embedding-profiles/${embeddingDraft.id}` : "/settings/embedding-profiles",
+        { method: embeddingDraft.id ? "PUT" : "POST", body: payload },
+      );
+      await loadSettings();
+      setEmbeddingDraft(embeddingDraftFrom(saved));
+      notify("Embedding Profile 已保存");
+    } catch (cause: any) {
+      setError(cause?.message || "保存 Embedding Profile 失败");
+    } finally { setEmbeddingBusy(false); }
+  }
+
+  async function deleteEmbedding() {
+    if (!embeddingDraft.id || !window.confirm(`归档“${embeddingDraft.name}”？`)) return;
+    setEmbeddingBusy(true); setError("");
+    try {
+      await api(`/settings/embedding-profiles/${embeddingDraft.id}`, { method: "DELETE" });
+      await loadSettings();
+      notify("Embedding Profile 已归档");
+    } catch (cause: any) {
+      setError(cause?.message || "归档 Embedding Profile 失败");
+    } finally { setEmbeddingBusy(false); }
+  }
+
+  async function testEmbedding() {
+    if (!embeddingDraft.id) { setError("请先保存 Embedding Profile，再执行测试。"); return; }
+    setEmbeddingBusy(true); setError(""); setEmbeddingResult("正在请求 Embedding…");
+    try {
+      const result = await api<any>(`/settings/embedding-profiles/${embeddingDraft.id}/test`, {
+        method: "POST", body: { text: embeddingTestText },
+      });
+      setEmbeddingResult(`向量合法 · 实际模型 ${result.model} · 维度 ${result.dimensions}\n前三维：${JSON.stringify(result.sample)}`);
+    } catch (cause: any) {
+      setEmbeddingResult("");
+      setError(`${cause?.code || "EMBEDDING_TEST_FAILED"}：${cause?.message || "Embedding 测试失败"}`);
+    } finally { setEmbeddingBusy(false); }
+  }
+
+  async function setDefaultEmbedding() {
+    if (!embeddingDraft.id) return;
+    setEmbeddingBusy(true); setError("");
+    try {
+      const next = await api<ModelSettings>("/settings/routing", {
+        method: "PUT", body: { default_embedding_profile_id: embeddingDraft.id },
+      });
+      setSettings(next);
+      notify("默认 Embedding Profile 已更新");
+    } catch (cause: any) {
+      setError(cause?.message || "更新默认 Embedding 失败");
+    } finally { setEmbeddingBusy(false); }
+  }
+
+  return <div className="book-stage settings-workspace-stage">
+    <div className="book-topline"><div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace.title}</span><span className="top-separator">/</span><span className="document-crumb">MODEL SETTINGS</span></div><div className="book-actions"><button className="head-btn" onClick={() => void loadSettings()}>{loading ? "读取中…" : "重新读取"}</button><button className="head-btn close-book-button" onClick={() => notify("设置已由服务端保存，关闭 Workplace 不会丢失。")}>服务端配置</button></div></div>
+    <div className="settings-workspace">
+      <header className="settings-workspace-head"><div><div className="eyebrow brass-text">UNIFIED MODEL SETTINGS</div><h1>让每个创作任务使用它真正需要的模型。</h1><p>Provider、Model Profile 与任务分配分层保存。API Key 只写入服务端本地密钥文件；读取接口只显示掩码。</p></div><span className="settings-engine-badge">ENGINE　{capabilities?.engine || settings?.legacy.engine || "unknown"}</span></header>
+      {error && <div className="character-error settings-error">{error}<button onClick={() => setError("")}>关闭</button></div>}
+      {loading || !settings ? <div className="character-state"><span className="thinking-mark">✦</span><p>正在展开模型配置……</p></div> : <>
+        <section className="settings-panel routing-panel">
+          <div className="settings-panel-head"><div><div className="eyebrow">TASK ASSIGNMENT</div><h2>全局默认与任务模型</h2><p>没有专属任务的模型会回退到全局默认；Embedding 不参与 LLM fallback。</p></div><button className="tool-button primary" disabled={routingBusy} onClick={() => void saveRouting()}>{routingBusy ? "保存中…" : "保存任务分配"}</button></div>
+          <div className="routing-grid">
+            <label className="field-label">全局默认 LLM<select value={defaultDraft} onChange={(event: any) => setDefaultDraft(event.target.value)}><option value="">使用 Khala 旧配置回退</option>{settings.llm_profiles.map(profile => <option key={profile.id} value={profile.id} disabled={!profile.enabled}>{profile.name} · {profile.model_id || profile.protocol}</option>)}</select></label>
+            {MODEL_TASK_INFO.map(task => <label className="field-label" key={task.key}>{task.label}<small>{task.zh}</small><select value={routingDraft[task.key] || ""} onChange={(event: any) => setRoutingDraft(previous => ({ ...previous, [task.key]: event.target.value }))}><option value="">回退到全局默认</option>{settings.llm_profiles.map(profile => <option key={profile.id} value={profile.id} disabled={!profile.enabled}>{profile.name} · {profile.model_id || profile.protocol}</option>)}</select></label>)}
+          </div>
+          <div className="settings-legacy-note">旧配置：engine <code>{settings.legacy.engine}</code> · model <code>{settings.legacy.model || "(none)"}</code>{settings.legacy.fallback_available ? " · 可作为未分配任务时的兼容回退" : " · 目前没有可用的旧模型回退"}</div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel-head"><div><div className="eyebrow">LANGUAGE MODELS</div><h2>LLM Profiles</h2><p>OpenAI-compatible、Gemini Native、Anthropic Messages 与 fake 测试引擎。自定义模型 ID 永远可以手动填写。</p></div><div className="settings-add-profile"><select value={presetToAdd} onChange={(event: any) => setPresetToAdd(event.target.value)}>{Object.entries(settings.provider_presets).map(([key, preset]) => <option key={key} value={key}>{preset.name}</option>)}</select><button className="tool-button" onClick={() => choosePreset(presetToAdd)}><Icon name="plus"/>从预设添加</button><button className="quiet-button" onClick={() => setProfileDraft(blankModelDraft())}>空白自定义</button></div></div>
+          <div className="model-settings-layout">
+            <aside className="model-profile-list">
+              {!settings.llm_profiles.length && <div className="asset-inline-empty">还没有模型 Profile。</div>}
+              {settings.llm_profiles.map(profile => <button key={profile.id} className={`model-profile-row ${profileDraft.id === profile.id ? "active" : ""} ${profile.enabled ? "" : "disabled"}`} onClick={() => selectProfile(profile)}><span className="model-protocol-mark">{profile.protocol === "openai-compatible" ? "OA" : profile.protocol === "gemini-native" ? "GM" : profile.protocol === "anthropic-messages" ? "AN" : "FX"}</span><span><strong>{profile.name}</strong><small>{profile.model_id || "model not set"} · {profile.provider}</small><em>{profile.api_key_configured ? `KEY ${profile.api_key_masked}` : "NO KEY"} · {profile.enabled ? "ENABLED" : "DISABLED"}</em></span></button>)}
+            </aside>
+            <div className="model-profile-editor">
+              <div className="model-editor-heading"><div><div className="eyebrow">{profileDraft.id ? "EDIT PROFILE" : "NEW PROFILE"}</div><h3>{profileDraft.name || "未命名模型 Profile"}</h3></div><label className="switch-row"><input type="checkbox" checked={profileDraft.enabled} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, enabled: event.target.checked }))}/><span>启用</span></label></div>
+              <div className="settings-form-grid">
+                <label className="field-label">Profile 名称<input value={profileDraft.name} maxLength={256} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, name: event.target.value }))} placeholder="例如：DeepSeek 主写作模型"/></label>
+                <label className="field-label">Provider 名称<input value={profileDraft.provider} maxLength={128} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, provider: event.target.value }))} placeholder="deepseek / openrouter / local"/></label>
+                <label className="field-label">Protocol<select value={profileDraft.protocol} onChange={(event: any) => changeProtocol(event.target.value as ModelProtocol)}>{Object.entries(settings.protocols).map(([key, protocol]) => <option key={key} value={key}>{protocol.label}</option>)}</select></label>
+                <label className="field-label">Timeout (seconds)<input type="number" min={1} max={300} value={profileDraft.timeout_seconds} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, timeout_seconds: Number(event.target.value) }))}/></label>
+                <label className="field-label wide">Base URL<input value={profileDraft.base_url} maxLength={2048} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, base_url: event.target.value }))} placeholder="https://api.example.com/v1 或 http://127.0.0.1:11434/v1"/></label>
+                <label className="field-label wide">Model ID<div className="model-id-control"><input value={profileDraft.model_id} maxLength={512} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, model_id: event.target.value }))} placeholder="任意模型 ID；不依赖白名单"/><button className="quiet-button" disabled={profileBusy} onClick={() => void discoverModels()}>获取模型</button>{discoveredModels.length > 0 && <select value="" onChange={(event: any) => { if (event.target.value) setProfileDraft(previous => ({ ...previous, model_id: event.target.value })); }}><option value="">从已读取列表选择</option>{discoveredModels.map(model => <option key={model.id} value={model.id}>{model.name} ({model.id})</option>)}</select>}</div></label>
+                <label className="field-label wide">API Key<div className="secret-input"><input type="password" value={profileDraft.api_key} autoComplete="new-password" onChange={(event: any) => setProfileDraft(previous => ({ ...previous, api_key: event.target.value }))} placeholder={profileDraft.id ? "留空保留现有密钥" : "可留空用于本地服务"}/>{profileDraft.id && <small>{settings.llm_profiles.find(profile => profile.id === profileDraft.id)?.api_key_masked || "未配置密钥"}</small>}</div></label>
+                <label className="field-label wide">自定义 Headers（JSON 对象）<textarea rows={4} spellCheck={false} value={profileDraft.headers} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, headers: event.target.value }))}/><small>认证头请使用 API Key 字段，不接受 Authorization、x-api-key 或 Cookie。</small></label>
+              </div>
+              <div className="capability-editor"><div className="eyebrow">CAPABILITIES · UNKNOWN IS ALLOWED</div><div className="capability-grid">{MODEL_CAPABILITY_INFO.map(item => <label key={item.key}><span>{item.label}</span><select value={profileDraft.capabilities[item.key] === true ? "yes" : profileDraft.capabilities[item.key] === false ? "no" : "unknown"} onChange={(event: any) => setProfileDraft(previous => { const capabilities = { ...previous.capabilities }; if (event.target.value === "unknown") delete capabilities[item.key]; else capabilities[item.key] = event.target.value === "yes"; return { ...previous, capabilities }; })}><option value="unknown">Unknown</option><option value="yes">Supported</option><option value="no">Not supported</option></select></label>)}</div><div className="settings-form-grid compact"><label className="field-label">Context Window<input value={profileDraft.context_window} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, context_window: event.target.value }))} placeholder="留空表示 Unknown"/></label><label className="field-label">Max Output Tokens<input value={profileDraft.max_output_tokens_limit} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, max_output_tokens_limit: event.target.value }))} placeholder="留空表示 Unknown"/></label></div></div>
+              <div className="parameter-editor"><div className="eyebrow">DEFAULT GENERATION PARAMETERS</div><div className="settings-form-grid compact"><label className="field-label">Temperature<input value={profileDraft.temperature} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, temperature: event.target.value }))} placeholder="留空则不发送"/></label><label className="field-label">Top P<input value={profileDraft.top_p} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, top_p: event.target.value }))} placeholder="留空则不发送"/></label><label className="field-label">Max Output Tokens<input value={profileDraft.max_output_tokens} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, max_output_tokens: event.target.value }))} placeholder="例如 4096"/></label><label className="field-label">Reasoning Effort<input value={profileDraft.reasoning_effort} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, reasoning_effort: event.target.value }))} placeholder="仅在 capability 支持时发送"/></label></div><div className="parameter-checks"><label><input type="checkbox" checked={profileDraft.stream} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, stream: event.target.checked }))}/> 默认 Streaming</label><label><input type="checkbox" checked={profileDraft.json_mode} onChange={(event: any) => setProfileDraft(previous => ({ ...previous, json_mode: event.target.checked }))}/> 默认请求 JSON 输出</label></div></div>
+              {testResult && <pre className="model-test-result">{testResult}</pre>}
+              <div className="model-editor-actions">{profileDraft.id && <button className="quiet-button danger-text" disabled={profileBusy} onClick={() => void deleteProfile()}>归档 Profile</button>}<div><button className="tool-button" disabled={profileBusy} onClick={() => void testProfile()}>{profileBusy ? "处理中…" : "测试连接"}</button><button className="tool-button primary" disabled={profileBusy} onClick={() => void saveProfile()}>{profileBusy ? "保存中…" : "保存 Profile"}</button></div></div>
+            </div>
+          </div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel-head"><div><div className="eyebrow">EMBEDDINGS · INDEPENDENT</div><h2>Embedding Profiles</h2><p>独立于文本生成模型。未配置时不会影响写作、角色或场景；语义检索类功能会明确提示尚未配置。</p></div><button className="quiet-button" onClick={() => setEmbeddingDraft(blankEmbeddingDraft())}><Icon name="plus"/>新建 Embedding</button></div>
+          <div className="model-settings-layout">
+            <aside className="model-profile-list">
+              {!settings.embedding_profiles.length && <div className="asset-inline-empty">还没有 Embedding Profile。</div>}
+              {settings.embedding_profiles.map(profile => <button key={profile.id} className={`model-profile-row ${embeddingDraft.id === profile.id ? "active" : ""}`} onClick={() => selectEmbedding(profile)}><span className="model-protocol-mark">EM</span><span><strong>{profile.name}</strong><small>{profile.model_id} · {profile.dimensions ? `${profile.dimensions} dim` : "dimension unknown"}</small><em>{profile.api_key_configured ? `KEY ${profile.api_key_masked}` : "NO KEY"} · {settings.default_embedding_profile_id === profile.id ? "DEFAULT" : "NOT DEFAULT"}</em></span></button>)}
+            </aside>
+            <div className="model-profile-editor">
+              <div className="settings-form-grid">
+                <label className="field-label">Profile 名称<input value={embeddingDraft.name} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, name: event.target.value }))} placeholder="例如：OpenAI text-embedding-3-small"/></label>
+                <label className="field-label">Provider<input value={embeddingDraft.provider} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, provider: event.target.value }))} placeholder="openai / custom"/></label>
+                <label className="field-label wide">Base URL<input value={embeddingDraft.base_url} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, base_url: event.target.value }))} placeholder="https://api.openai.com/v1"/></label>
+                <label className="field-label wide">Model ID<input value={embeddingDraft.model_id} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, model_id: event.target.value }))} placeholder="text-embedding-3-small 或任意兼容模型"/></label>
+                <label className="field-label wide">API Key<div className="secret-input"><input type="password" autoComplete="new-password" value={embeddingDraft.api_key} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, api_key: event.target.value }))} placeholder={embeddingDraft.id ? "留空保留现有密钥" : "可留空用于本地服务"}/>{embeddingDraft.id && <small>{settings.embedding_profiles.find(profile => profile.id === embeddingDraft.id)?.api_key_masked || "未配置密钥"}</small>}</div></label>
+                <label className="field-label">Dimensions<input value={embeddingDraft.dimensions} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, dimensions: event.target.value }))} placeholder="留空由服务返回"/></label>
+                <label className="field-label">Batch Size<input type="number" min={1} max={256} value={embeddingDraft.batch_size} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, batch_size: Number(event.target.value) }))}/></label>
+                <label className="field-label">Timeout (seconds)<input type="number" min={1} max={300} value={embeddingDraft.timeout_seconds} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, timeout_seconds: Number(event.target.value) }))}/></label>
+                <label className="switch-row"><input type="checkbox" checked={embeddingDraft.enabled} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, enabled: event.target.checked }))}/><span>启用</span></label>
+                <label className="field-label wide">自定义 Headers（JSON）<textarea rows={3} value={embeddingDraft.headers} onChange={(event: any) => setEmbeddingDraft(previous => ({ ...previous, headers: event.target.value }))}/></label>
+              </div>
+              <div className="embedding-test-box"><label className="field-label">测试文本<textarea rows={3} value={embeddingTestText} onChange={(event: any) => setEmbeddingTestText(event.target.value)}/></label><div><button className="tool-button" disabled={embeddingBusy} onClick={() => void testEmbedding()}>发送测试向量</button>{embeddingDraft.id && <button className="quiet-button" disabled={embeddingBusy || settings.default_embedding_profile_id === embeddingDraft.id} onClick={() => void setDefaultEmbedding()}>设为默认 Embedding</button>}</div>{embeddingResult && <pre className="model-test-result">{embeddingResult}</pre>}</div>
+              <div className="model-editor-actions">{embeddingDraft.id && <button className="quiet-button danger-text" disabled={embeddingBusy} onClick={() => void deleteEmbedding()}>归档 Profile</button>}<button className="tool-button primary" disabled={embeddingBusy} onClick={() => void saveEmbedding()}>{embeddingBusy ? "保存中…" : "保存 Embedding Profile"}</button></div>
+            </div>
+          </div>
+        </section>
+
+        <ManualAcceptancePanel notify={notify}/>
+
+        <section className="settings-panel local-preferences-panel"><div className="settings-panel-head"><div><div className="eyebrow">LOCAL EDITOR PREFERENCES</div><h2>本地阅读偏好</h2><p>字号和默认封面只影响当前浏览器的阅读体验，不属于服务端创作数据。</p></div></div><div className="settings-form-grid compact"><label className="setting-row"><span><strong>正文字号</strong><small>Adjust manuscript reading size.</small></span><div className="range-control"><input type="range" min="14" max="22" value={editorFontSize} onChange={(event: any) => setEditorFontSize(Number(event.target.value))}/><b>{editorFontSize}px</b></div></label><div className="setting-row cover-setting"><span><strong>新书默认封面</strong><small>Only the initial cover selection.</small></span><div className="color-options">{COVER_PALETTE.map(color => <button key={color.color} aria-label={color.label} title={color.label} className={defaultCover === color.color ? "chosen" : ""} style={{ background: color.color }} onClick={() => setDefaultCover(color.color)}/>)}</div></div></div></section>
+      </>}
+    </div>
+  </div>;
+}
+
+interface SceneExtractionInput {
+  selectionText: string;
+  contextBefore: string;
+  contextAfter: string;
+  documentContent: string;
+  revision: number;
+}
+
+function extractionDraftFrom(draft: SceneExtractionDraft): SceneExtractionDraft {
+  return {
+    ...draft,
+    given_circumstances: { ...draft.given_circumstances },
+    dramatic_situation: { ...draft.dramatic_situation },
+    direction: { ...draft.direction },
+    cast: (draft.cast || []).map((entry, index) => ({ ...entry, sort_order: entry.sort_order ?? index })),
+    unresolved_characters: [...(draft.unresolved_characters || [])],
+    source: { ...draft.source },
+  };
+}
+
+function SceneExtractionModal({ workplace, document, input, onClose, onCreated }: {
+  workplace: Workplace; document: StudioDocument; input: SceneExtractionInput;
+  onClose: () => void; onCreated: (result: SceneExtractionResult) => void;
+}) {
+  const selectionAvailable = Boolean(input.selectionText.trim());
+  const [scope, setScope] = React.useState<"selection" | "document">(selectionAvailable ? "selection" : "document");
+  const [characters, setCharacters] = React.useState<StudioCharacter[]>([]);
+  const [charactersLoading, setCharactersLoading] = React.useState(true);
+  const [draft, setDraft] = React.useState<SceneExtractionDraft | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [confirmBusy, setConfirmBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [manualCharacter, setManualCharacter] = React.useState("");
+
+  React.useEffect(() => {
+    let alive = true;
+    api<StudioCharacter[]>(`/workplaces/${workplace.id}/characters`)
+      .then(list => { if (alive) setCharacters(list); })
+      .catch((cause: any) => { if (alive) setError(cause?.message || "无法读取 Character Pool"); })
+      .finally(() => { if (alive) setCharactersLoading(false); });
+    return () => { alive = false; };
+  }, [workplace.id]);
+
+  const sourceText = scope === "selection" ? input.selectionText : input.documentContent;
+  const castIds = new Set((draft?.cast || []).map(entry => entry.character_id));
+
+  async function generateDraft() {
+    if (!sourceText.trim() || busy) return;
+    setBusy(true); setError("");
+    try {
+      const result = await api<SceneExtractionDraft>(
+        `/workplaces/${workplace.id}/documents/${document.id}/scene-extraction`,
+        {
+          method: "POST",
+          body: {
+            expected_revision: input.revision,
+            scope,
+            selected_text: scope === "selection" ? input.selectionText : "",
+            context_before: input.contextBefore,
+            context_after: input.contextAfter,
+          },
+        },
+      );
+      setDraft(extractionDraftFrom(result));
+    } catch (cause: any) {
+      const revision = cause instanceof StudioApiError && cause.status === 409
+        ? ` 当前服务器版本为 v${cause.currentRevision ?? "?"}；请重新打开文档后再提取。`
+        : "";
+      setError(`${cause?.code || "EXTRACTION_FAILED"}：${cause?.message || "Scene 提取失败"}${revision}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function editScene(update: (previous: SceneExtractionDraft) => SceneExtractionDraft) {
+    setDraft(previous => previous ? update(previous) : previous);
+  }
+
+  function editGiven(key: keyof SceneGivenCircumstances, value: string) {
+    editScene(previous => ({ ...previous, given_circumstances: { ...previous.given_circumstances, [key]: value } }));
+  }
+
+  function editDramatic(key: keyof SceneDramaticSituation, value: string) {
+    editScene(previous => ({ ...previous, dramatic_situation: { ...previous.dramatic_situation, [key]: value } }));
+  }
+
+  function editDirection(key: keyof SceneDirection, value: string) {
+    editScene(previous => ({ ...previous, direction: { ...previous.direction, [key]: value } }));
+  }
+
+  function editCast(index: number, key: keyof SceneExtractionCast, value: string) {
+    editScene(previous => ({
+      ...previous,
+      cast: previous.cast.map((entry, itemIndex) => itemIndex === index ? { ...entry, [key]: value } : entry),
+    }));
+  }
+
+  function addCast(character: StudioCharacter, seed?: Partial<SceneExtractionCast>) {
+    if (!character || castIds.has(character.id)) return;
+    editScene(previous => ({
+      ...previous,
+      cast: [...previous.cast, {
+        character_id: character.id, character_name: character.name,
+        objective: seed?.objective || "", action: seed?.action || "",
+        conflict: seed?.conflict || "", emotional_state: seed?.emotional_state || "",
+        performance_direction: seed?.performance_direction || "", subtext: seed?.subtext || "",
+        sort_order: previous.cast.length,
+      }],
+    }));
+  }
+
+  function resolveUnresolved(index: number, characterId: string) {
+    const character = characters.find(item => item.id === characterId);
+    if (!character) return;
+    editScene(previous => ({
+      ...previous,
+      cast: [...previous.cast, {
+        character_id: character.id, character_name: character.name,
+        objective: "", action: "", conflict: "", emotional_state: "",
+        performance_direction: "", subtext: "", sort_order: previous.cast.length,
+      }],
+      unresolved_characters: previous.unresolved_characters.filter((_, itemIndex) => itemIndex !== index),
+    }));
+  }
+
+  function ignoreUnresolved(index: number) {
+    editScene(previous => ({
+      ...previous,
+      unresolved_characters: previous.unresolved_characters.filter((_, itemIndex) => itemIndex !== index),
+    }));
+  }
+
+  function removeCast(index: number) {
+    editScene(previous => ({
+      ...previous,
+      cast: previous.cast.filter((_, itemIndex) => itemIndex !== index),
+    }));
+  }
+
+  async function confirmDraft() {
+    if (!draft || confirmBusy) return;
+    if (!draft.title.trim()) { setError("Scene 标题不能为空"); return; }
+    setConfirmBusy(true); setError("");
+    try {
+      const result = await api<SceneExtractionResult>(
+        `/workplaces/${workplace.id}/documents/${document.id}/scene-extractions/confirm`,
+        {
+          method: "POST",
+          body: {
+            title: draft.title.trim(), summary: draft.summary,
+            given_circumstances: draft.given_circumstances,
+            dramatic_situation: draft.dramatic_situation,
+            dialogue: draft.dialogue, direction: draft.direction,
+            expected_revision: draft.source.document_revision,
+            source_text_snapshot: draft.source.text,
+            source_selection_start: draft.source.selection_start,
+            source_selection_end: draft.source.selection_end,
+            cast: draft.cast.map((entry, index) => ({
+              character_id: entry.character_id, objective: entry.objective,
+              action: entry.action, conflict: entry.conflict,
+              emotional_state: entry.emotional_state,
+              performance_direction: entry.performance_direction,
+              subtext: entry.subtext, sort_order: index,
+            })),
+          },
+        },
+      );
+      onCreated(result);
+    } catch (cause: any) {
+      setError(`${cause?.code || "SCENE_CREATE_FAILED"}：${cause?.message || "无法创建 Scene"}`);
+    } finally {
+      setConfirmBusy(false);
+    }
+  }
+
+  const actions = draft
+    ? <>
+        <button className="quiet-button" onClick={() => setDraft(null)} disabled={confirmBusy}>返回来源确认</button>
+        <button className="quiet-button" onClick={onClose} disabled={confirmBusy}>取消</button>
+        <button className="confirm-button" onClick={() => void confirmDraft()} disabled={confirmBusy || !draft.title.trim()}>
+          {confirmBusy ? "创建 Scene…" : "确认并创建 Scene"}
+        </button>
+      </>
+    : <>
+        <button className="quiet-button" onClick={onClose} disabled={busy}>取消</button>
+        <button className="confirm-button" onClick={() => void generateDraft()} disabled={busy || !sourceText.trim()}>
+          {busy ? "正在提取…" : "确认原文并提取 Scene"}
+        </button>
+      </>;
+
+  return <Modal title={draft ? "审核 Scene Draft" : "从正文提取 Scene"} eyebrow={draft ? "AUTHOR REVIEW REQUIRED" : "WRITING → SCENE"} onClose={onClose} className="scene-extraction-modal" actions={actions}>
+    {error && <div className="character-error extraction-error">{error}<button onClick={() => setError("")}>关闭</button></div>}
+    {!draft ? <div className="extraction-source-step">
+      <p className="modal-intro">AI 只会读取下面这段原文。原始 Document 不会被修改；提取结果会先成为可编辑草稿，只有你确认后才会创建 Scene 与 Cast。</p>
+      <div className="extraction-scope-options">
+        <button className={scope === "selection" ? "active" : ""} disabled={!selectionAvailable || busy} onClick={() => setScope("selection")}>
+          <strong>当前选区</strong><span>{selectionAvailable ? `${input.selectionText.length.toLocaleString("zh-CN")} 字` : "没有可靠选区"}</span>
+        </button>
+        <button className={scope === "document" ? "active" : ""} disabled={busy} onClick={() => setScope("document")}>
+          <strong>整个 Document</strong><span>{input.documentContent.length.toLocaleString("zh-CN")} 字</span>
+        </button>
+      </div>
+      <div className="extraction-source-meta"><span>{document.title}</span><small>REVISION {input.revision} · {scope === "selection" ? "SELECTION SNAPSHOT" : "DOCUMENT SNAPSHOT"}</small></div>
+      <pre className="scene-extraction-source">{sourceText || "没有可提交的原文。"}</pre>
+      <p className="extraction-model-note">使用 Settings 中 Scene Extraction 任务分配的模型。Character Pool 会随请求一起提交，模型只能匹配已有 Character ID，不能创建新角色或修改 Canon。</p>
+    </div> : <div className="extraction-review">
+      <div className="extraction-review-head"><div><div className="eyebrow">SCENE DRAFT</div><h3>{draft.title || "未命名场景"}</h3><p>模型 {draft.model || "unknown"} · {draft.protocol || "unknown"} · 来源 {document.title} v{draft.source.document_revision}</p></div><span className="canon-seal">DRAFT · NOT CANON</span></div>
+      <div className="extraction-source-strip"><span>{draft.source.scope === "selection" ? "选区来源" : "全文来源"}</span><p>{draft.source.text.slice(0, 420)}{draft.source.text.length > 420 ? "…" : ""}</p></div>
+      <div className="settings-form-grid extraction-form">
+        <label className="field-label wide">Scene 标题<input value={draft.title} maxLength={512} onChange={(event: any) => editScene(previous => ({ ...previous, title: event.target.value }))}/></label>
+        <label className="field-label wide">摘要<textarea rows={3} value={draft.summary} onChange={(event: any) => editScene(previous => ({ ...previous, summary: event.target.value }))}/></label>
+      </div>
+
+      <section className="extraction-section"><div className="extraction-section-head"><div className="eyebrow">GIVEN CIRCUMSTANCES</div><h4>规定情境</h4><p>时间、地点与人物进入这一场之前已经发生的事。</p></div><div className="settings-form-grid"><label className="field-label">时间<input value={draft.given_circumstances.time} onChange={(event: any) => editGiven("time", event.target.value)}/></label><label className="field-label">地点<input value={draft.given_circumstances.place} onChange={(event: any) => editGiven("place", event.target.value)}/></label><label className="field-label">环境<input value={draft.given_circumstances.environment} onChange={(event: any) => editGiven("environment", event.target.value)}/></label><label className="field-label wide">背景<textarea rows={3} value={draft.given_circumstances.background} onChange={(event: any) => editGiven("background", event.target.value)}/></label><label className="field-label wide">此前事件<textarea rows={3} value={draft.given_circumstances.prior_events} onChange={(event: any) => editGiven("prior_events", event.target.value)}/></label></div></section>
+
+      <section className="extraction-section"><div className="extraction-section-head"><div className="eyebrow">DRAMATIC SITUATION</div><h4>戏剧情境</h4><p>这一场真正需要被回答的问题，以及情境发生转向的时刻。</p></div><div className="settings-form-grid"><label className="field-label wide">核心问题<textarea rows={2} value={draft.dramatic_situation.central_question} onChange={(event: any) => editDramatic("central_question", event.target.value)}/></label><label className="field-label wide">主要冲突<textarea rows={3} value={draft.dramatic_situation.primary_conflict} onChange={(event: any) => editDramatic("primary_conflict", event.target.value)}/></label><label className="field-label wide">转折<textarea rows={3} value={draft.dramatic_situation.turn} onChange={(event: any) => editDramatic("turn", event.target.value)}/></label></div></section>
+
+      <section className="extraction-section"><div className="extraction-section-head"><div className="eyebrow">CAST & OBJECTIVES</div><h4>角色与场景目标</h4><p>这些目标只属于当前 Scene，不会改写 Character Identity 或 Visual Canon。</p></div>
+        {!draft.cast.length && <div className="extraction-empty">模型没有可靠匹配任何已有 Character。你可以从 Character Pool 手动加入。</div>}
+        <div className="extraction-cast-list">{draft.cast.map((entry, index) => <article className="extraction-cast-card" key={entry.character_id}>
+          <div className="extraction-cast-head"><span className="cast-monogram">{entry.character_name.slice(0, 1)}</span><div><strong>{entry.character_name}</strong><small>{characters.find(character => character.id === entry.character_id)?.role || "来自现有 Character Pool"}</small></div><button className="quiet-button danger-text" onClick={() => removeCast(index)}>移出 Cast</button></div>
+          <div className="settings-form-grid"><label className="field-label wide">Objective<textarea rows={2} value={entry.objective} onChange={(event: any) => editCast(index, "objective", event.target.value)}/></label><label className="field-label">Action<input value={entry.action} onChange={(event: any) => editCast(index, "action", event.target.value)}/></label><label className="field-label">Conflict<input value={entry.conflict} onChange={(event: any) => editCast(index, "conflict", event.target.value)}/></label><label className="field-label">情绪状态<input value={entry.emotional_state} onChange={(event: any) => editCast(index, "emotional_state", event.target.value)}/></label><label className="field-label wide">表演指导<textarea rows={2} value={entry.performance_direction} onChange={(event: any) => editCast(index, "performance_direction", event.target.value)}/></label><label className="field-label wide">潜台词<textarea rows={2} value={entry.subtext} onChange={(event: any) => editCast(index, "subtext", event.target.value)}/></label></div>
+        </article>)}</div>
+        <div className="extraction-add-cast"><select value={manualCharacter} disabled={charactersLoading} onChange={(event: any) => setManualCharacter(event.target.value)}><option value="">从 Character Pool 加入角色…</option>{characters.filter(character => !castIds.has(character.id)).map(character => <option key={character.id} value={character.id}>{character.name}</option>)}</select><button className="tool-button" disabled={!manualCharacter} onClick={() => { const character = characters.find(item => item.id === manualCharacter); if (character) addCast(character); setManualCharacter(""); }}><Icon name="plus"/>加入 Cast</button></div>
+      </section>
+
+      {!!draft.unresolved_characters.length && <section className="extraction-section unresolved-section"><div className="extraction-section-head"><div className="eyebrow">NEEDS AUTHOR DECISION</div><h4>待确认人物</h4><p>这些人物未能可靠匹配到现有 Character。不会自动创建角色，也不会仅凭同名认定身份。</p></div><div className="unresolved-list">{draft.unresolved_characters.map((entry, index) => <div className="unresolved-row" key={`${entry.name}:${index}`}><div><strong>{entry.name}</strong><small>{entry.reason}</small></div><select defaultValue="" onChange={(event: any) => { if (event.target.value) resolveUnresolved(index, event.target.value); }}><option value="">匹配已有 Character…</option>{characters.filter(character => !castIds.has(character.id)).map(character => <option key={character.id} value={character.id}>{character.name}</option>)}</select><button className="quiet-button" onClick={() => ignoreUnresolved(index)}>忽略</button></div>)}</div></section>}
+
+      <section className="extraction-section"><div className="extraction-section-head"><div className="eyebrow">DIALOGUE & DIRECTION</div><h4>对白与导演设计</h4><p>台词、潜台词、调度与镜头建议都可以在创建后继续修改。</p></div><div className="settings-form-grid"><label className="field-label wide">Dialogue<textarea rows={6} value={draft.dialogue} onChange={(event: any) => editScene(previous => ({ ...previous, dialogue: event.target.value }))}/></label><label className="field-label">Blocking<textarea rows={3} value={draft.direction.blocking} onChange={(event: any) => editDirection("blocking", event.target.value)}/></label><label className="field-label">空间位置<textarea rows={3} value={draft.direction.spatial} onChange={(event: any) => editDirection("spatial", event.target.value)}/></label><label className="field-label">表演指导<textarea rows={3} value={draft.direction.performance_direction} onChange={(event: any) => editDirection("performance_direction", event.target.value)}/></label><label className="field-label">镜头指导<textarea rows={3} value={draft.direction.camera} onChange={(event: any) => editDirection("camera", event.target.value)}/></label></div></section>
+
+      <p className="extraction-confirm-note">确认后只会创建新的 Scene 与 Cast，并记录来源 Document、revision、快照和可用选区范围。不会修改原文、已有 Scene 或 Character Canon。</p>
+    </div>}
+  </Modal>;
+}
+
 function App() {
   const [screen, setScreen] = React.useState<"loading" | "shelf" | "opening" | "workplace" | "closing">("loading");
-  const [section, setSection] = React.useState<Section>("writing");
+  const [section, setSection] = React.useState<Section>(() => {
+    const stored = localStorage.getItem(RESUME_SECTION_KEY);
+    return stored === "characters" || stored === "scenes" || stored === "assets" || stored === "settings" || stored === "writing" ? stored : "writing";
+  });
   const [capabilities, setCapabilities] = React.useState<Capabilities | null>(null);
   const [workplaces, setWorkplaces] = React.useState<Workplace[]>([]);
   const [workplace, setWorkplace] = React.useState<Workplace | null>(null);
@@ -2275,7 +3115,7 @@ function App() {
   const [conflict, setConflict] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
-  const [modal, setModal] = React.useState<"create-book" | "create-document" | "contents" | "inspire" | "continue" | "versions" | "assets" | null>(null);
+  const [modal, setModal] = React.useState<"create-book" | "create-document" | "contents" | "inspire" | "continue" | "versions" | "assets" | "extract-scene" | "extraction-created" | "document-scenes" | null>(null);
   const [bookTitle, setBookTitle] = React.useState("");
   const [bookDescription, setBookDescription] = React.useState("");
   const [bookColor, setBookColor] = React.useState(COVER_PALETTE[0].color);
@@ -2284,10 +3124,14 @@ function App() {
   const [versionList, setVersionList] = React.useState<VersionEntry[]>([]);
   const [inspiration, setInspiration] = React.useState("");
   const [inspireBusy, setInspireBusy] = React.useState(false);
+  const [extractionInput, setExtractionInput] = React.useState<SceneExtractionInput | null>(null);
+  const [createdExtraction, setCreatedExtraction] = React.useState<SceneExtractionResult | null>(null);
+  const [sceneLaunch, setSceneLaunch] = React.useState<{ sceneId: string; storyboard: boolean; nonce: number } | null>(null);
+  const [documentScenes, setDocumentScenes] = React.useState<StudioScene[]>([]);
+  const [documentScenesLoading, setDocumentScenesLoading] = React.useState(false);
   const [continuation, setContinuation] = React.useState("");
   const [continueBusy, setContinueBusy] = React.useState(false);
   const [continueError, setContinueError] = React.useState("");
-  const [selectedModel, setSelectedModel] = React.useState<string>(() => localStorage.getItem("khala.studio.model") || "");
   const [editorFontSize, setEditorFontSize] = React.useState<number>(() => Number(localStorage.getItem("khala.studio.fontSize") || 17));
   const [defaultCover, setDefaultCover] = React.useState<string>(() => localStorage.getItem("khala.studio.coverColor") || COVER_PALETTE[0].color);
   const [toast, setToast] = React.useState("");
@@ -2297,6 +3141,8 @@ function App() {
   const [openingColor, setOpeningColor] = React.useState(COVER_PALETTE[0].color);
   const [openingFoil, setOpeningFoil] = React.useState(COVER_PALETTE[0].foil);
   const [lastError, setLastError] = React.useState("");
+  const [assetFocus, setAssetFocus] = React.useState<string | null>(null);
+  const [demoBusy, setDemoBusy] = React.useState(false);
 
   const pageHtmlRef = React.useRef<string[]>(["<p><br></p>"]);
   const editorRefs = React.useRef<Record<number, HTMLDivElement | null>>({});
@@ -2309,6 +3155,7 @@ function App() {
   const turnTimerRef = React.useRef<any>(null);
   const toastTimerRef = React.useRef<any>(null);
   const savedRangeRef = React.useRef<Range | null>(null);
+  const resumeAttemptedRef = React.useRef(false);
 
   React.useEffect(() => {
     latestRef.current.workplace = workplace;
@@ -2329,8 +3176,14 @@ function App() {
         if (!alive) return;
         setCapabilities(caps);
         setWorkplaces(books);
-        if (!selectedModel && caps.default_model) setSelectedModel(caps.default_model);
-        setScreen("shelf");
+        const resumeId = localStorage.getItem(RESUME_WORKPLACE_KEY);
+        const resumeBook = resumeId ? books.find(book => book.id === resumeId) : null;
+        if (resumeBook && !resumeAttemptedRef.current) {
+          resumeAttemptedRef.current = true;
+          await openWorkplace(resumeBook, true);
+        } else {
+          setScreen("shelf");
+        }
       } catch (cause: any) {
         if (!alive) return;
         setError(cause?.message || "无法连接 Studio API");
@@ -2339,6 +3192,13 @@ function App() {
     })();
     return () => { alive = false; };
   }, []);
+
+  React.useEffect(() => {
+    if (screen !== "workplace" || !workplace) return;
+    localStorage.setItem(RESUME_WORKPLACE_KEY, workplace.id);
+    if (activeDocument) localStorage.setItem(RESUME_DOCUMENT_KEY, activeDocument.id);
+    localStorage.setItem(RESUME_SECTION_KEY, section);
+  }, [screen, workplace?.id, activeDocument?.id, section]);
 
   React.useEffect(() => {
     if (!toast) return;
@@ -2442,8 +3302,26 @@ function App() {
     installDocument(data);
   }
 
-  async function openWorkplace(item: Workplace) {
+  async function openSourceDocument(documentId: string) {
+    if (!workplace) return;
+    if (!(await flushSave())) {
+      notify("当前文档尚未安全保存，无法切换来源文档。");
+      return;
+    }
+    try {
+      await loadDocument(documentId);
+      setSection("writing");
+      notify("已返回 Scene 的来源 Document；原文没有被提取流程修改");
+    } catch (cause: any) {
+      notify(cause?.message || "无法打开来源 Document");
+    }
+  }
+
+  async function openWorkplace(item: Workplace, resume = false) {
     if (!(await flushSave())) return;
+    const resumable = resume || localStorage.getItem(RESUME_WORKPLACE_KEY) === item.id;
+    const storedDocumentId = resumable ? localStorage.getItem(RESUME_DOCUMENT_KEY) : null;
+    const storedSection = resumable ? localStorage.getItem(RESUME_SECTION_KEY) : null;
     setError("");
     setOpeningTitle(item.title);
     const meta = colorMeta(item.cover_color);
@@ -2455,9 +3333,13 @@ function App() {
       const current = await api<Workplace>(`/workplaces/${item.id}`);
       setWorkplace(current);
       latestRef.current.workplace = current;
+      setAssetFocus(null);
       const list = await api<StudioDocument[]>(`/workplaces/${item.id}/documents`);
       setDocuments(list);
-      let preferred = list.find(doc => doc.kind === "manuscript") || list.find(doc => doc.kind === "chapter") || list[0];
+      let preferred = (storedDocumentId && list.find(doc => doc.id === storedDocumentId))
+        || list.find(doc => doc.kind === "manuscript")
+        || list.find(doc => doc.kind === "chapter")
+        || list[0];
       if (!preferred) {
         preferred = await api<StudioDocument>(`/workplaces/${item.id}/documents`, {
           method: "POST",
@@ -2468,9 +3350,14 @@ function App() {
       }
       const data = await api<StudioDocument>(`/workplaces/${item.id}/documents/${preferred.id}`);
       installDocument(data);
-      setSection("writing");
+      const nextSection = storedSection === "characters" || storedSection === "scenes" || storedSection === "assets" || storedSection === "settings"
+        ? storedSection as Section : "writing";
+      setSection(nextSection);
+      localStorage.setItem(RESUME_WORKPLACE_KEY, item.id);
+      localStorage.setItem(RESUME_DOCUMENT_KEY, data.id);
+      localStorage.setItem(RESUME_SECTION_KEY, nextSection);
       setMode("write");
-      const delay = Math.max(0, 1650 - (Date.now() - started));
+      const delay = resume ? 120 : Math.max(0, 1650 - (Date.now() - started));
       window.setTimeout(() => setScreen("workplace"), delay);
     } catch (cause: any) {
       setError(cause?.message || "无法打开 Workplace");
@@ -2481,6 +3368,9 @@ function App() {
 
   async function closeWorkplace() {
     if (!(await flushSave())) return;
+    localStorage.removeItem(RESUME_WORKPLACE_KEY);
+    localStorage.removeItem(RESUME_DOCUMENT_KEY);
+    localStorage.removeItem(RESUME_SECTION_KEY);
     setScreen("closing");
     window.setTimeout(() => {
       setScreen("shelf");
@@ -2507,6 +3397,21 @@ function App() {
     } catch (cause: any) {
       setError(cause?.message || "创建 Workplace 失败");
     } finally { setLoading(false); }
+  }
+
+  async function loadDemo() {
+    if (demoBusy) return;
+    setDemoBusy(true); setError("");
+    try {
+      const result = await api<{ created: boolean; workplace: Workplace }>("/demo", { method: "POST" });
+      await refreshWorkplaces();
+      await openWorkplace(result.workplace);
+      notify(result.created ? "示例故事已建立；图片明确标注为示意资料" : "已打开已有的示例故事");
+    } catch (cause: any) {
+      setError(cause?.message || "无法加载示例故事");
+    } finally {
+      setDemoBusy(false);
+    }
   }
 
   async function createDocument() {
@@ -2579,13 +3484,67 @@ function App() {
     return { selected_text: "", context_before: all.slice(-18000), context_after: "" };
   }
 
+  async function openSceneExtraction() {
+    if (!workplace || !activeDocument || loading) return;
+    if (conflict) {
+      notify("请先重新载入服务器版本，再进行 Scene 提取。");
+      return;
+    }
+    const captured = captureSelection();
+    if (!(await flushSave())) {
+      notify("文档尚未安全保存，暂时不能提取 Scene。");
+      return;
+    }
+    const current = latestRef.current.document;
+    if (!current) return;
+    setExtractionInput({
+      selectionText: captured.selected_text,
+      contextBefore: captured.context_before,
+      contextAfter: captured.context_after,
+      documentContent: markdownFromPages(pageHtmlRef.current),
+      revision: current.revision,
+    });
+    setModal("extract-scene");
+  }
+
+  function finishSceneExtraction(result: SceneExtractionResult, openBoard: boolean) {
+    setCreatedExtraction(null);
+    setModal(null);
+    setSceneLaunch({ sceneId: result.scene.id, storyboard: openBoard, nonce: Date.now() });
+    setSection("scenes");
+    notify(openBoard ? "Scene 已创建；正在进入 Storyboard" : "Scene 已创建，来源记录已保存");
+  }
+
+  async function openDocumentScenes() {
+    if (!workplace || !activeDocument) return;
+    setModal("document-scenes"); setDocumentScenesLoading(true);
+    try {
+      setDocumentScenes(await api<StudioScene[]>(`/workplaces/${workplace.id}/documents/${activeDocument.id}/scenes`));
+    } catch (cause: any) {
+      notify(cause?.message || "无法读取这份 Document 提取出的 Scenes");
+      setDocumentScenes([]);
+    } finally {
+      setDocumentScenesLoading(false);
+    }
+  }
+
+  async function openExtractedScene(sceneId: string) {
+    if (!(await flushSave())) {
+      notify("当前文档尚未安全保存，无法打开提取出的 Scene。");
+      return;
+    }
+    setModal(null);
+    setSceneLaunch({ sceneId, storyboard: false, nonce: Date.now() });
+    setSection("scenes");
+  }
+
   async function requestInspiration() {
     if (!workplace || !activeDocument) return;
     const context = captureSelection();
     setInspiration(""); setInspireBusy(true); setModal("inspire");
     try {
       const result = await api<{ content: string; model: string }>(`/workplaces/${workplace.id}/documents/${activeDocument.id}/ai/inspire`, {
-        method: "POST", body: { ...context, model: selectedModel || capabilities?.default_model || undefined, instruction: "Give me several distinct and specific creative directions. Do not rewrite the source text." },
+        method: "POST", body: { ...context, instruction: "Give me several distinct and specific creative directions. Do not rewrite the source text." },
       });
       setInspiration(result.content || "这次没有返回灵感内容。");
     } catch (cause: any) { setInspiration(`获取灵感失败：${cause?.message || "未知错误"}`); }
@@ -2602,7 +3561,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/workplaces/${workplace.id}/documents/${activeDocument.id}/ai/continue`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...context, model: selectedModel || capabilities?.default_model || undefined,
+        body: JSON.stringify({ ...context,
           instruction: "Continue naturally from the selected text or cursor, preserving the established character voice and scene context.", max_tokens: 1024 }),
         signal: controller.signal,
       });
@@ -2742,7 +3701,6 @@ function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [screen, modal, spread, pages, turnDirection]);
 
-  function setModel(value: string) { setSelectedModel(value); localStorage.setItem("khala.studio.model", value); }
   function setFontSize(value: number) { const size = Math.max(14, Math.min(22, value)); setEditorFontSize(size); localStorage.setItem("khala.studio.fontSize", String(size)); }
   function setCoverDefault(value: string) { setDefaultCover(value); localStorage.setItem("khala.studio.coverColor", value); }
 
@@ -2760,19 +3718,19 @@ function App() {
       </header>
       <div className="shelf-intro">
         <div><div className="eyebrow brass-text">YOUR CREATIVE LIBRARY</div><h1>每一本书，都是一个世界。</h1><p>在这里，打开你的下一个创造。</p></div>
-        <button className="outline-light-button" onClick={() => { setBookTitle(""); setBookDescription(""); setBookColor(defaultCover); setError(""); setModal("create-book"); }}>＋　创建 Workplace</button>
+        <div className="shelf-intro-actions"><button className="outline-light-button" onClick={() => { setBookTitle(""); setBookDescription(""); setBookColor(defaultCover); setError(""); setModal("create-book"); }}>＋　创建 Workplace</button><button className="outline-light-button sample-load-button" disabled={demoBusy} onClick={() => void loadDemo()}>{demoBusy ? "正在装订示例…" : "打开示例故事"}</button><small>示例使用独立 [SAMPLE] Workplace；示意图片会明确标注，不冒充模型生成结果。</small></div>
       </div>
       {error && <div className="shelf-error">{error}</div>}
       <div className="shelf-grid">
         {workplaces.map((item, index) => {
           const theme = colorMeta(item.cover_color);
-          return <button className="book-card" key={item.id} onClick={() => void openWorkplace(item)} style={{ "--cover": item.cover_color || theme.color, "--cover-edge": theme.edge, "--foil": theme.foil } as any}>
+          return <button className={`book-card ${item.sample ? "sample-book" : ""}`} key={item.id} onClick={() => void openWorkplace(item)} style={{ "--cover": item.cover_color || theme.color, "--cover-edge": theme.edge, "--foil": theme.foil } as any}>
             <div className="book-object"><div className="book-pages-edge"/><div className="book-cover"><div className="book-spine"/><div className="cover-content">
-              <div className="cover-sub">KHALA　·　STUDIO</div><div className="cover-rule"/><div className="cover-emblem">{index % 2 === 0 ? "✦" : "❧"}</div>
+              <div className="cover-sub">KHALA　·　STUDIO</div><div className="cover-rule"/><div className="cover-emblem">{index % 2 === 0 ? "✦" : "❧"}</div>{item.sample && <span className="sample-book-label">SAMPLE · 示例资料</span>}
               <h2 className="cover-title">{item.title}</h2><div className="cover-sub">{item.description || "A WORLD BETWEEN THE PAGES"}</div><div className="cover-rule"/>
               <div className="cover-bottom">{item.document_count} DOCUMENTS</div>
             </div></div></div>
-            <div className="book-meta"><span>{item.title}</span><small>{item.document_count} 篇文档 · {fmtDate(item.updated_at)}</small></div>
+            <div className="book-meta"><span>{item.title}</span><small>{item.document_count} 篇文档 · {item.sample ? "示例资料 · " : ""}{fmtDate(item.updated_at)}</small></div>
           </button>;
         })}
         {!workplaces.length && screen !== "loading" && <div className="empty-shelf"><div className="empty-book">✦</div><h2>书架还空着。</h2><p>创建第一本创作之书，让你的世界从这里开始。</p><button className="outline-light-button" onClick={() => { setBookTitle(""); setBookDescription(""); setBookColor(defaultCover); setError(""); setModal("create-book"); }}>创建第一本书</button></div>}
@@ -2816,7 +3774,7 @@ function App() {
     return <div className="book-stage">
       <div className="book-topline">
         <div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace?.title}</span><span className="top-separator">/</span><span className="document-crumb">{activeDocument?.title || "未命名手稿"}</span></div>
-        <div className="book-actions"><button className="head-btn" onClick={() => setModal("contents")}>目录</button><button className="head-btn" onClick={() => void openVersions()}>版本</button><button className="head-btn" onClick={() => setMode(current => current === "write" ? "read" : "write")}>{mode === "write" ? "阅读模式" : "写作模式"}</button><button className="head-btn close-book-button" onClick={() => void closeWorkplace()}>合上书本</button></div>
+        <div className="book-actions"><button className="head-btn" onClick={() => setModal("contents")}>目录</button><button className="head-btn" onClick={() => void openVersions()}>版本</button><button className="head-btn" onClick={() => void openDocumentScenes()}>提取记录</button><button className="head-btn" onClick={() => setMode(current => current === "write" ? "read" : "write")}>{mode === "write" ? "阅读模式" : "写作模式"}</button><button className="head-btn close-book-button" onClick={() => void closeWorkplace()}>合上书本</button></div>
       </div>
       <div className="open-book">
         <section className="page page-left">
@@ -2833,7 +3791,7 @@ function App() {
           <div className="page-head"><span>{`DRAFT V${activeDocument?.revision || 1}`}</span><strong className={`save-indicator ${saveState === "版本冲突" ? "danger" : ""}`}>{saveState}</strong></div>
           <div className="writer-heading">
             <div><div className="eyebrow">THE STORY CONTINUES</div><h1>{activeDocument?.title || "未命名手稿"}</h1><div className="writer-meta">字数 {wordCount.toLocaleString("zh-CN")}　·　{mode === "write" ? "写作中" : "阅读中"}</div></div>
-            {mode === "write" && <div className="writer-tools"><button className="tool-button" onMouseDown={(event: any) => event.preventDefault()} onClick={() => setModal("assets")}><Icon name="link"/>文档素材</button><button className="tool-button" onMouseDown={(event: any) => event.preventDefault()} onClick={() => void requestInspiration()}><Icon name="lightbulb"/>给我灵感</button><button className="tool-button primary" onMouseDown={(event: any) => event.preventDefault()} onClick={() => void startContinuation()}><Icon name="sparkle"/>AI 续写</button></div>}
+            {mode === "write" && <div className="writer-tools"><button className="tool-button" onMouseDown={(event: any) => event.preventDefault()} onClick={() => setModal("assets")}><Icon name="link"/>文档素材</button><button className="tool-button extract-scene-button" onMouseDown={(event: any) => event.preventDefault()} onClick={() => void openSceneExtraction()}><Icon name="scene"/>Extract Scene</button><button className="tool-button" onMouseDown={(event: any) => event.preventDefault()} onClick={() => void requestInspiration()}><Icon name="lightbulb"/>给我灵感</button><button className="tool-button primary" onMouseDown={(event: any) => event.preventDefault()} onClick={() => void startContinuation()}><Icon name="sparkle"/>AI 续写</button></div>}
           </div>
           <div className="page-body writer-body" style={{ "--editor-font-size": `${editorFontSize}px` } as any}>
             <div key={`${activeDocument?.id}-${rightIndex}`} ref={(element: HTMLDivElement | null) => { editorRefs.current[rightIndex] = element; }} className="manuscript-page" contentEditable={mode === "write"} suppressContentEditableWarning spellCheck={false} data-placeholder="从这里开始写下你的故事……"
@@ -2871,26 +3829,11 @@ function App() {
     </div>;
   }
 
-  function renderSettings() {
-    return <div className="book-stage section-placeholder settings-stage">
-      <div className="book-topline"><div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace?.title}</span><span className="top-separator">/</span><span className="document-crumb">SETTINGS</span></div><div className="book-actions"><button className="head-btn" onClick={() => setSection("writing")}>返回书稿</button><button className="head-btn close-book-button" onClick={() => void closeWorkplace()}>合上书本</button></div></div>
-      <div className="open-book placeholder-book">
-        <section className="page page-left"><div className="page-head"><span>THE WORKSHOP</span><strong>PREFERENCES</strong></div><div className="placeholder-ornament">K</div><div className="placeholder-quote">A quiet place<br/>for imagination.</div><div className="page-number">— KHALA —</div></section>
-        <section className="page page-right"><div className="page-head"><span>STUDIO PREFERENCES</span><strong>LOCAL SETTINGS</strong></div><div className="settings-content"><div className="eyebrow">AI & WRITING</div><h1>创作偏好</h1>
-          <label className="setting-row"><span><strong>写作模型</strong><small>此模型用于“给我灵感”和“AI 续写”。</small></span><select value={selectedModel || capabilities?.default_model || ""} onChange={(event: any) => setModel(event.target.value)}>{(capabilities?.models || []).map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
-          <label className="setting-row"><span><strong>正文排版字号</strong><small>调整书页中正文的阅读大小。</small></span><div className="range-control"><input type="range" min="14" max="22" value={editorFontSize} onChange={(event: any) => setFontSize(Number(event.target.value))}/><b>{editorFontSize}px</b></div></label>
-          <div className="setting-row cover-setting"><span><strong>新书默认封面</strong><small>创建 Workplace 时预选的封面颜色。</small></span><div className="color-options">{COVER_PALETTE.map(color => <button key={color.color} aria-label={color.label} title={color.label} className={defaultCover === color.color ? "chosen" : ""} style={{ background: color.color }} onClick={() => setCoverDefault(color.color)}/>)}</div></div>
-          <div className="settings-note"><strong>存储说明</strong><p>写作模型选择和排版偏好目前保存在当前浏览器中。服务器默认模型由 Khala 配置项 <code>studio_model</code> 控制；当前后端尚未提供 Studio Settings 写入接口。</p><small>ENGINE　{capabilities?.engine || "unknown"}　·　STORAGE　{capabilities?.storage || "local"}　·　AI　{capabilities?.ai_available ? "AVAILABLE" : "UNAVAILABLE"}</small></div>
-        </div><div className="page-number">— SETTINGS —</div></section><div className="book-spine"/>
-      </div>
-    </div>;
-  }
-
   function renderWorkplace() {
     return <section className="workplace-screen" style={{ "--editor-font-size": `${editorFontSize}px` } as any}>
       <header className="workplace-header"><div className="header-brand"><div className="brand-mark small">K</div><span>KHALA STUDIO</span></div><div className="header-title">{workplace?.title || ""}</div><div className="header-right"><span className="server-state"><i/>LOCAL WORKSPACE</span><button className="close-workspace" onClick={() => void closeWorkplace()}>合上书本</button></div></header>
       {renderSectionNav()}
-      {section === "writing" ? renderWritingSection() : section === "characters" ? <CharactersWorkspace workplace={workplace!} notify={notify}/> : section === "scenes" ? <ScenesWorkspace workplace={workplace!} notify={notify}/> : section === "assets" ? <AssetsWorkspace workplace={workplace!} notify={notify}/> : section === "settings" ? renderSettings() : renderPlaceholderSection(section)}
+      {section === "writing" ? renderWritingSection() : section === "characters" ? <CharactersWorkspace workplace={workplace!} notify={notify} onStartWriting={() => setSection("writing")}/> : section === "scenes" ? <ScenesWorkspace workplace={workplace!} notify={notify} launch={sceneLaunch} onLaunchConsumed={() => setSceneLaunch(null)} onOpenSourceDocument={(documentId) => void openSourceDocument(documentId)} onOpenAsset={(assetId) => { setAssetFocus(assetId); setSection("assets"); }}/> : section === "assets" ? <AssetsWorkspace workplace={workplace!} notify={notify} focusAssetId={assetFocus}/> : section === "settings" ? <SettingsWorkspace workplace={workplace!} capabilities={capabilities} editorFontSize={editorFontSize} setEditorFontSize={setFontSize} defaultCover={defaultCover} setDefaultCover={setCoverDefault} notify={notify}/> : renderPlaceholderSection(section)}
       {toast && <div className="toast-message">{toast}</div>}
     </section>;
   }
@@ -2959,6 +3902,32 @@ function App() {
     </Modal>;
   }
 
+  function renderDocumentScenesModal() {
+    return <Modal title="这份手稿提取出的 Scenes" eyebrow="SOURCE TRACE" onClose={() => setModal(null)} className="document-scenes-modal" actions={<button className="quiet-button" onClick={() => setModal(null)}>关闭</button>}>
+      <p className="modal-intro">这些 Scene 保存了从本文档提取时的 revision 与文本快照。原文之后继续修改，不会自动改动已有 Scene。</p>
+      {documentScenesLoading ? <div className="thinking-state"><span className="thinking-mark">✦</span>正在查阅提取记录……</div> : documentScenes.length ? <div className="document-scene-list">{documentScenes.map(scene => <article key={scene.id}><div><span>SCENE</span><strong>{scene.title}</strong><small>{scene.cast_count} 位角色 · 来源 revision {scene.source_document_revision ?? "—"} · {scene.source_selection_start != null ? `范围 ${scene.source_selection_start}–${scene.source_selection_end}` : "全文或无法可靠定位的选区"}</small><p>{scene.summary || scene.dramatic_situation?.central_question || "尚未写摘要"}</p></div><button className="tool-button" onClick={() => void openExtractedScene(scene.id)}>打开 Scene</button></article>)}</div> : <div className="empty-versions">这份 Document 还没有提取过 Scene。选择正文或使用整个 Document，然后点击“Extract Scene”。</div>}
+      {!documentScenesLoading && <button className="tool-button primary extracted-scene-cta" onClick={() => { setModal(null); void openSceneExtraction(); }}><Icon name="sparkle"/>从当前正文再提取一个 Scene</button>}
+    </Modal>;
+  }
+
+  function renderSceneExtractionModal() {
+    if (!workplace || !activeDocument || !extractionInput) return null;
+    return <SceneExtractionModal workplace={workplace} document={activeDocument} input={extractionInput}
+      onClose={() => { setModal(null); setExtractionInput(null); }}
+      onCreated={result => { setCreatedExtraction(result); setExtractionInput(null); setModal("extraction-created"); }}/>;
+  }
+
+  function renderExtractionCreatedModal() {
+    if (!createdExtraction) return null;
+    const result = createdExtraction;
+    return <Modal title="Scene 已建立" eyebrow="FROM PAGE TO STAGE" onClose={() => finishSceneExtraction(result, false)}
+      actions={<><button className="quiet-button" onClick={() => finishSceneExtraction(result, false)}>打开 Scene</button><button className="confirm-button" onClick={() => finishSceneExtraction(result, true)}>创建 Storyboard</button></>}>
+      <p className="modal-intro">“{result.scene.title}”已作为独立 Scene 保存。原文没有被修改，来源 Document、revision 与文本快照仍可追溯。</p>
+      <div className="extraction-success-card"><div><span>SOURCE DOCUMENT</span><strong>{activeDocument?.title || result.scene.source_document_id}</strong><small>REVISION {result.scene.source_document_revision ?? "—"}</small></div><div><span>CAST</span><strong>{result.cast.length} 位角色</strong><small>全部来自当前 Workplace 的 Character Pool</small></div><div><span>NEXT</span><strong>Storyboard</strong><small>Scene 与 Cast 会作为分镜上下文</small></div></div>
+      {result.scene.source_text_snapshot && <pre className="scene-extraction-source success-source">{result.scene.source_text_snapshot.slice(0, 1200)}{(result.scene.source_text_snapshot.length || 0) > 1200 ? "…" : ""}</pre>}
+    </Modal>;
+  }
+
   function renderModal() {
     if (modal === "create-book") return renderCreateBookModal();
     if (modal === "create-document") return renderCreateDocModal();
@@ -2967,6 +3936,9 @@ function App() {
     if (modal === "continue") return renderContinueModal();
     if (modal === "versions") return renderVersionsModal();
     if (modal === "assets") return renderWritingAssetsModal();
+    if (modal === "document-scenes") return renderDocumentScenesModal();
+    if (modal === "extract-scene") return renderSceneExtractionModal();
+    if (modal === "extraction-created") return renderExtractionCreatedModal();
     return null;
   }
 

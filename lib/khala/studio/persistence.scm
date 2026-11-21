@@ -58,7 +58,24 @@
             studio-create-version!
             studio-list-versions
             studio-get-version
-            studio-restore-version!))
+            studio-restore-version!
+            studio-list-model-profiles
+            studio-get-model-profile
+            studio-create-model-profile!
+            studio-update-model-profile!
+            studio-archive-model-profile!
+            studio-list-embedding-profiles
+            studio-get-embedding-profile
+            studio-create-embedding-profile!
+            studio-update-embedding-profile!
+            studio-archive-embedding-profile!
+            studio-get-setting
+            studio-set-setting!
+            studio-list-task-assignments
+            studio-set-task-assignments!
+            studio-create-extracted-scene!
+            studio-list-document-scenes
+            studio-latest-version-for-revision))
 
 ;; Studio storage is deliberately independent from ComfyUI history and queue
 ;; persistence. Every operation opens a short-lived DBI connection, as the
@@ -285,11 +302,77 @@
    "ALTER TABLE studio_scenes
       ADD COLUMN reference_asset_ids TEXT NOT NULL DEFAULT '[]'"))
 
+;; Model settings are server-owned Studio configuration. API keys intentionally
+;; do not live in this database; they are kept in a separate mode-0600 local
+;; secrets file and are never returned through GET endpoints.
+(define migration-8
+  (list
+   "CREATE TABLE IF NOT EXISTS studio_model_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    )"
+   "CREATE TABLE IF NOT EXISTS studio_model_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+      provider TEXT NOT NULL DEFAULT 'custom',
+      protocol TEXT NOT NULL CHECK(protocol IN
+        ('openai-compatible', 'gemini-native', 'anthropic-messages', 'fake')),
+      base_url TEXT NOT NULL DEFAULT '',
+      model_id TEXT NOT NULL DEFAULT '',
+      custom_headers TEXT NOT NULL DEFAULT '{}',
+      timeout_seconds INTEGER NOT NULL DEFAULT 60
+        CHECK(timeout_seconds BETWEEN 1 AND 300),
+      parameters TEXT NOT NULL DEFAULT '{}',
+      capabilities TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT
+    )"
+   "CREATE INDEX IF NOT EXISTS studio_model_profiles_active
+      ON studio_model_profiles(archived_at, updated_at DESC)"
+   "CREATE TABLE IF NOT EXISTS studio_task_assignments (
+      task TEXT PRIMARY KEY CHECK(task IN
+        ('writing', 'character_development', 'scene_extraction',
+         'storyboard_planning')),
+      profile_id TEXT REFERENCES studio_model_profiles(id) ON DELETE SET NULL,
+      updated_at TEXT NOT NULL
+    )"
+   "CREATE TABLE IF NOT EXISTS studio_embedding_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+      provider TEXT NOT NULL DEFAULT 'custom',
+      protocol TEXT NOT NULL DEFAULT 'openai-embeddings'
+        CHECK(protocol IN ('openai-embeddings')),
+      base_url TEXT NOT NULL DEFAULT '',
+      model_id TEXT NOT NULL DEFAULT '',
+      dimensions INTEGER CHECK(dimensions IS NULL OR dimensions > 0),
+      batch_size INTEGER NOT NULL DEFAULT 16 CHECK(batch_size BETWEEN 1 AND 256),
+      timeout_seconds INTEGER NOT NULL DEFAULT 60
+        CHECK(timeout_seconds BETWEEN 1 AND 300),
+      custom_headers TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT
+    )"
+   "CREATE INDEX IF NOT EXISTS studio_embedding_profiles_active
+      ON studio_embedding_profiles(archived_at, updated_at DESC)"
+   "ALTER TABLE studio_scenes ADD COLUMN source_document_id TEXT"
+   "ALTER TABLE studio_scenes ADD COLUMN source_document_version_id TEXT"
+   "ALTER TABLE studio_scenes ADD COLUMN source_document_revision INTEGER"
+   "ALTER TABLE studio_scenes ADD COLUMN source_text_snapshot TEXT"
+   "ALTER TABLE studio_scenes ADD COLUMN source_selection_start INTEGER"
+   "ALTER TABLE studio_scenes ADD COLUMN source_selection_end INTEGER"
+   "CREATE INDEX IF NOT EXISTS studio_scenes_source_document
+      ON studio_scenes(source_document_id, created_at DESC)"))
+
 (define (migrations)
   (list (cons 1 migration-1) (cons 2 migration-2)
         (cons 3 migration-3) (cons 4 migration-4)
         (cons 5 migration-5) (cons 6 migration-6)
-        (cons 7 migration-7)))
+        (cons 7 migration-7) (cons 8 migration-8)))
 
 (define (studio-now)
   (strftime "%Y-%m-%dT%H:%M:%SZ" (gmtime (current-time))))
@@ -964,7 +1047,10 @@
    time, place, environment, background, prior_events,
    central_question, primary_conflict, turn, dialogue,
    blocking, spatial, performance_direction, camera,
-   storyboard, reference_asset_ids, created_at, updated_at, deleted_at")
+   storyboard, reference_asset_ids, source_document_id,
+   source_document_version_id, source_document_revision,
+   source_text_snapshot, source_selection_start, source_selection_end,
+   created_at, updated_at, deleted_at")
 
 (define (scene-from-row row)
   `((id . ,(row-value row "id"))
@@ -988,6 +1074,12 @@
     (camera . ,(or (row-value row "camera") ""))
     (storyboard . ,(or (row-value row "storyboard") "[]"))
     (reference_asset_ids . ,(or (row-value row "reference_asset_ids") "[]"))
+    (source_document_id . ,(row-value row "source_document_id"))
+    (source_document_version_id . ,(row-value row "source_document_version_id"))
+    (source_document_revision . ,(row-value row "source_document_revision"))
+    (source_text_snapshot . ,(row-value row "source_text_snapshot"))
+    (source_selection_start . ,(row-value row "source_selection_start"))
+    (source_selection_end . ,(row-value row "source_selection_end"))
     (created_at . ,(row-value row "created_at"))
     (updated_at . ,(row-value row "updated_at"))
     (deleted_at . ,(row-value row "deleted_at"))
@@ -1001,7 +1093,10 @@
                   s.prior_events, s.central_question, s.primary_conflict,
                   s.turn, s.dialogue, s.blocking, s.spatial,
                   s.performance_direction, s.camera, s.storyboard,
-                  s.reference_asset_ids, s.created_at,
+                  s.reference_asset_ids, s.source_document_id,
+                  s.source_document_version_id, s.source_document_revision,
+                  s.source_text_snapshot, s.source_selection_start,
+                  s.source_selection_end, s.created_at,
                   s.updated_at, s.deleted_at,
                   (SELECT COUNT(*) FROM studio_scene_cast c
                    WHERE c.scene_id = s.id) AS cast_count
@@ -1019,7 +1114,10 @@
                      s.prior_events, s.central_question, s.primary_conflict,
                      s.turn, s.dialogue, s.blocking, s.spatial,
                      s.performance_direction, s.camera, s.storyboard,
-                     s.reference_asset_ids, s.created_at,
+                     s.reference_asset_ids, s.source_document_id,
+                     s.source_document_version_id, s.source_document_revision,
+                     s.source_text_snapshot, s.source_selection_start,
+                     s.source_selection_end, s.created_at,
                      s.updated_at, s.deleted_at,
                      (SELECT COUNT(*) FROM studio_scene_cast c
                       WHERE c.scene_id = s.id) AS cast_count
@@ -1035,7 +1133,9 @@
       (with-transaction db
         (lambda ()
           (let ((now (studio-now))
-                (field (lambda (key) (or (assoc-ref values key) ""))))
+                (field (lambda (key) (or (assoc-ref values key) "")))
+                (cast-field (lambda (entry key)
+                              (or (assoc-ref entry key) ""))))
             (query db
                    "INSERT INTO studio_scenes
                       (id, workplace_id, title, summary, sort_order, status,
@@ -1054,6 +1154,107 @@
                    (field 'spatial) (field 'performance_direction)
                    (field 'camera) now now)
             (scene-by-id db workplace-id id)))))))
+
+;; Scene extraction confirmation is intentionally one transaction: a Scene is
+;; never persisted with a partially replaced Cast.
+(define (studio-create-extracted-scene! config id workplace-id values cast)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now))
+                (field (lambda (key) (or (assoc-ref values key) "")))
+                (cast-field (lambda (entry key)
+                              (or (assoc-ref entry key) ""))))
+            (query db
+                   "INSERT INTO studio_scenes
+                      (id, workplace_id, title, summary, sort_order, status,
+                       time, place, environment, background, prior_events,
+                       central_question, primary_conflict, turn, dialogue,
+                       blocking, spatial, performance_direction, camera,
+                       source_document_id, source_document_version_id,
+                       source_document_revision, source_text_snapshot,
+                       source_selection_start, source_selection_end,
+                       created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?, ?)"
+                   id workplace-id (assoc-ref values 'title)
+                   (field 'summary) (assoc-ref values 'sort_order)
+                   (assoc-ref values 'status)
+                   (field 'time) (field 'place) (field 'environment)
+                   (field 'background) (field 'prior_events)
+                   (field 'central_question) (field 'primary_conflict)
+                   (field 'turn) (field 'dialogue) (field 'blocking)
+                   (field 'spatial) (field 'performance_direction)
+                   (field 'camera)
+                   (sql-value (assoc-ref values 'source_document_id))
+                   (sql-value (assoc-ref values 'source_document_version_id))
+                   (sql-value (assoc-ref values 'source_document_revision))
+                   (sql-value (assoc-ref values 'source_text_snapshot))
+                   (sql-value (assoc-ref values 'source_selection_start))
+                   (sql-value (assoc-ref values 'source_selection_end))
+                   now now)
+            (for-each
+             (lambda (entry)
+               (query db
+                      "SELECT id FROM studio_characters
+                        WHERE id = ? AND workplace_id = ? AND archived_at IS NULL"
+                      (assoc-ref entry 'character_id) workplace-id)
+               (unless (dbi-get_row db)
+                 (throw 'studio-cast-error 'character-not-found))
+               (query db
+                      "INSERT INTO studio_scene_cast
+                         (id, scene_id, character_id, objective, action,
+                          conflict, emotional_state, performance_direction,
+                          subtext, sort_order, created_at, updated_at)
+                       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                      (studio-new-id) id (assoc-ref entry 'character_id)
+                      (cast-field entry 'objective) (cast-field entry 'action)
+                      (cast-field entry 'conflict)
+                      (cast-field entry 'emotional_state)
+                      (cast-field entry 'performance_direction)
+                      (cast-field entry 'subtext)
+                      (or (assoc-ref entry 'sort_order) 0) now now))
+             cast)
+            (scene-by-id db workplace-id id)))))))
+
+(define (studio-list-document-scenes config workplace-id document-id)
+  (with-db config
+    (lambda (db)
+      (query db
+             "SELECT s.id, s.workplace_id, s.title, s.summary, s.sort_order,
+                     s.status, s.time, s.place, s.environment, s.background,
+                     s.prior_events, s.central_question, s.primary_conflict,
+                     s.turn, s.dialogue, s.blocking, s.spatial,
+                     s.performance_direction, s.camera, s.storyboard,
+                     s.reference_asset_ids, s.source_document_id,
+                     s.source_document_version_id, s.source_document_revision,
+                     s.source_text_snapshot, s.source_selection_start,
+                     s.source_selection_end, s.created_at,
+                     s.updated_at, s.deleted_at,
+                     (SELECT COUNT(*) FROM studio_scene_cast c
+                      WHERE c.scene_id = s.id) AS cast_count
+                FROM studio_scenes s
+               WHERE s.workplace_id = ? AND s.source_document_id = ?
+                 AND s.deleted_at IS NULL
+               ORDER BY s.created_at DESC, s.id DESC"
+             workplace-id document-id)
+      (map scene-from-row (all-rows db)))))
+
+(define (studio-latest-version-for-revision config workplace-id document-id revision)
+  (with-db config
+    (lambda (db)
+      (query db
+             "SELECT v.id, v.document_id, v.revision, v.title, v.content,
+                     v.label, v.source, v.created_at
+                FROM studio_document_versions v
+                JOIN studio_documents d ON d.id = v.document_id
+               WHERE d.workplace_id = ? AND v.document_id = ?
+                 AND v.revision = ?
+               ORDER BY v.created_at DESC, v.id DESC LIMIT 1"
+             workplace-id document-id revision)
+      (let ((row (dbi-get_row db)))
+        (and row (version-from-row row))))))
 
 (define (studio-get-scene config workplace-id scene-id)
   (with-db config (lambda (db) (scene-by-id db workplace-id scene-id))))
@@ -1626,3 +1827,311 @@
                      (insert-version! db (studio-new-id) document-id next-revision
                                       title content #f "restore" now)
                      (document-by-id db workplace-id document-id))))))))))
+
+;; --- Unified model settings -------------------------------------------------
+
+(define model-profile-columns
+  "id, name, provider, protocol, base_url, model_id, custom_headers,
+   timeout_seconds, parameters, capabilities, enabled, created_at,
+   updated_at, archived_at")
+
+(define (model-profile-from-row row)
+  `((id . ,(row-value row "id"))
+    (name . ,(row-value row "name"))
+    (provider . ,(row-value row "provider"))
+    (protocol . ,(row-value row "protocol"))
+    (base_url . ,(or (row-value row "base_url") ""))
+    (model_id . ,(or (row-value row "model_id") ""))
+    (custom_headers . ,(or (row-value row "custom_headers") "{}"))
+    (timeout_seconds . ,(db-int (row-value row "timeout_seconds")))
+    (parameters . ,(or (row-value row "parameters") "{}"))
+    (capabilities . ,(or (row-value row "capabilities") "{}"))
+    (enabled . ,(= 1 (db-int (row-value row "enabled"))))
+    (created_at . ,(row-value row "created_at"))
+    (updated_at . ,(row-value row "updated_at"))
+    (archived_at . ,(row-value row "archived_at"))))
+
+(define (model-profile-by-id db profile-id)
+  (query db
+         (string-append "SELECT " model-profile-columns "
+                           FROM studio_model_profiles
+                          WHERE id = ? AND archived_at IS NULL")
+         profile-id)
+  (let ((row (dbi-get_row db)))
+    (and row (model-profile-from-row row))))
+
+(define (studio-list-model-profiles config)
+  (with-db config
+    (lambda (db)
+      (query db
+             (string-append "SELECT " model-profile-columns "
+                               FROM studio_model_profiles
+                              WHERE archived_at IS NULL
+                              ORDER BY enabled DESC, updated_at DESC, id ASC"))
+      (map model-profile-from-row (all-rows db)))))
+
+(define (studio-get-model-profile config profile-id)
+  (with-db config (lambda (db) (model-profile-by-id db profile-id))))
+
+(define (studio-create-model-profile! config id values)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now))
+                (field (lambda (key default)
+                         (let ((value (assoc-ref values key)))
+                           (if value value default)))))
+            (query db
+                   "INSERT INTO studio_model_profiles
+                      (id, name, provider, protocol, base_url, model_id,
+                       custom_headers, timeout_seconds, parameters,
+                       capabilities, enabled, created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   id (assoc-ref values 'name)
+                   (field 'provider "custom") (assoc-ref values 'protocol)
+                   (field 'base_url "") (field 'model_id "")
+                   (field 'custom_headers "{}")
+                   (field 'timeout_seconds 60)
+                   (field 'parameters "{}") (field 'capabilities "{}")
+                   (if (assoc-ref values 'enabled) 1 0) now now)
+            (model-profile-by-id db id)))))))
+
+(define (studio-update-model-profile! config profile-id updates)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let* ((now (studio-now))
+                 (normalized
+                  (map (lambda (entry)
+                         (if (eq? (car entry) 'enabled)
+                             (cons 'enabled (if (cdr entry) 1 0))
+                             entry))
+                       updates))
+                 (clause (update-clause
+                          normalized
+                          '(name provider protocol base_url model_id
+                            custom_headers timeout_seconds parameters
+                            capabilities enabled)))
+                 (sets (car clause))
+                 (query-values (cdr clause)))
+            (if (null? sets)
+                (model-profile-by-id db profile-id)
+                (begin
+                  (dbi-params-query db
+                    (string-append
+                     "UPDATE studio_model_profiles SET "
+                     (string-join sets ", ")
+                     ", updated_at = ? WHERE id = ? AND archived_at IS NULL")
+                    (append query-values (list now profile-id)))
+                  (and (> (dbi-affected-rows db) 0)
+                       (let ((updated (model-profile-by-id db profile-id)))
+                         (when (equal? 0 (assoc-ref normalized 'enabled))
+                           (query db "UPDATE studio_task_assignments
+                                         SET profile_id = NULL, updated_at = ?
+                                       WHERE profile_id = ?"
+                                  now profile-id)
+                           (query db "UPDATE studio_model_settings
+                                         SET value = '', updated_at = ?
+                                       WHERE key = 'default_model_profile_id'
+                                         AND value = ?"
+                                  now profile-id))
+                         updated))))))))))
+
+(define (studio-archive-model-profile! config profile-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now)))
+            (query db "UPDATE studio_model_profiles
+                          SET archived_at = ?, updated_at = ?, enabled = 0
+                        WHERE id = ? AND archived_at IS NULL"
+                   now now profile-id)
+            (and (> (dbi-affected-rows db) 0)
+                 (begin
+                   (query db "UPDATE studio_task_assignments SET profile_id = NULL,
+                                     updated_at = ? WHERE profile_id = ?"
+                          now profile-id)
+                   (query db "UPDATE studio_model_settings SET value = '',
+                                     updated_at = ?
+                               WHERE key = 'default_model_profile_id' AND value = ?"
+                          now profile-id)
+                   now))))))))
+
+(define embedding-profile-columns
+  "id, name, provider, protocol, base_url, model_id, dimensions, batch_size,
+   timeout_seconds, custom_headers, enabled, created_at, updated_at,
+   archived_at")
+
+(define (embedding-profile-from-row row)
+  `((id . ,(row-value row "id"))
+    (name . ,(row-value row "name"))
+    (provider . ,(or (row-value row "provider") "custom"))
+    (protocol . ,(or (row-value row "protocol") "openai-embeddings"))
+    (base_url . ,(or (row-value row "base_url") ""))
+    (model_id . ,(or (row-value row "model_id") ""))
+    (dimensions . ,(row-value row "dimensions"))
+    (batch_size . ,(db-int (row-value row "batch_size")))
+    (timeout_seconds . ,(db-int (row-value row "timeout_seconds")))
+    (custom_headers . ,(or (row-value row "custom_headers") "{}"))
+    (enabled . ,(= 1 (db-int (row-value row "enabled"))))
+    (created_at . ,(row-value row "created_at"))
+    (updated_at . ,(row-value row "updated_at"))
+    (archived_at . ,(row-value row "archived_at"))))
+
+(define (embedding-profile-by-id db profile-id)
+  (query db
+         (string-append "SELECT " embedding-profile-columns "
+                           FROM studio_embedding_profiles
+                          WHERE id = ? AND archived_at IS NULL")
+         profile-id)
+  (let ((row (dbi-get_row db)))
+    (and row (embedding-profile-from-row row))))
+
+(define (studio-list-embedding-profiles config)
+  (with-db config
+    (lambda (db)
+      (query db
+             (string-append "SELECT " embedding-profile-columns "
+                               FROM studio_embedding_profiles
+                              WHERE archived_at IS NULL
+                              ORDER BY enabled DESC, updated_at DESC, id ASC"))
+      (map embedding-profile-from-row (all-rows db)))))
+
+(define (studio-get-embedding-profile config profile-id)
+  (with-db config (lambda (db) (embedding-profile-by-id db profile-id))))
+
+(define (studio-create-embedding-profile! config id values)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now))
+                (field (lambda (key default)
+                         (let ((value (assoc-ref values key)))
+                           (if value value default)))))
+            (query db
+                   "INSERT INTO studio_embedding_profiles
+                      (id, name, provider, protocol, base_url, model_id,
+                       dimensions, batch_size, timeout_seconds, custom_headers,
+                       enabled, created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   id (assoc-ref values 'name)
+                   (field 'provider "custom")
+                   (field 'protocol "openai-embeddings")
+                   (field 'base_url "") (field 'model_id "")
+                   (sql-value (assoc-ref values 'dimensions))
+                   (field 'batch_size 16) (field 'timeout_seconds 60)
+                   (field 'custom_headers "{}")
+                   (if (assoc-ref values 'enabled) 1 0) now now)
+            (embedding-profile-by-id db id)))))))
+
+(define (studio-update-embedding-profile! config profile-id updates)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let* ((now (studio-now))
+                 (normalized
+                  (map (lambda (entry)
+                         (if (eq? (car entry) 'enabled)
+                             (cons 'enabled (if (cdr entry) 1 0))
+                             entry))
+                       updates))
+                 (clause (update-clause
+                          normalized
+                          '(name provider protocol base_url model_id dimensions
+                            batch_size timeout_seconds custom_headers enabled)))
+                 (sets (car clause))
+                 (query-values (cdr clause)))
+            (if (null? sets)
+                (embedding-profile-by-id db profile-id)
+                (begin
+                  (dbi-params-query db
+                    (string-append
+                     "UPDATE studio_embedding_profiles SET "
+                     (string-join sets ", ")
+                     ", updated_at = ? WHERE id = ? AND archived_at IS NULL")
+                    (append query-values (list now profile-id)))
+                  (and (> (dbi-affected-rows db) 0)
+                         (let ((updated (embedding-profile-by-id db profile-id)))
+                         (when (equal? 0 (assoc-ref normalized 'enabled))
+                           (query db "UPDATE studio_model_settings
+                                         SET value = '', updated_at = ?
+                                       WHERE key = 'default_embedding_profile_id'
+                                         AND value = ?"
+                                  now profile-id))
+                         updated))))))))))
+
+(define (studio-archive-embedding-profile! config profile-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now)))
+            (query db "UPDATE studio_embedding_profiles
+                          SET archived_at = ?, updated_at = ?, enabled = 0
+                        WHERE id = ? AND archived_at IS NULL"
+                   now now profile-id)
+            (and (> (dbi-affected-rows db) 0)
+                 (begin
+                   (query db "UPDATE studio_model_settings SET value = '',
+                                     updated_at = ?
+                               WHERE key = 'default_embedding_profile_id'
+                                 AND value = ?"
+                          now profile-id)
+                   now))))))))
+
+(define (studio-get-setting config key)
+  (with-db config
+    (lambda (db)
+      (query db "SELECT value FROM studio_model_settings WHERE key = ?" key)
+      (let ((row (dbi-get_row db)))
+        (and row (row-value row "value"))))))
+
+(define (studio-set-setting! config key value)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now)))
+            (query db
+                   "INSERT INTO studio_model_settings(key, value, updated_at)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                      updated_at = excluded.updated_at"
+                   key (or value "") now)
+            value))))))
+
+(define (studio-list-task-assignments config)
+  (with-db config
+    (lambda (db)
+      (query db "SELECT task, profile_id, updated_at
+                   FROM studio_task_assignments
+                  ORDER BY task ASC")
+      (map (lambda (row)
+             `((task . ,(row-value row "task"))
+               (profile_id . ,(row-value row "profile_id"))
+               (updated_at . ,(row-value row "updated_at"))))
+           (all-rows db)))))
+
+(define (studio-set-task-assignments! config assignments)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now)))
+            (for-each
+             (lambda (entry)
+               (query db
+                      "INSERT INTO studio_task_assignments(task, profile_id, updated_at)
+                       VALUES(?, ?, ?)
+                       ON CONFLICT(task) DO UPDATE SET
+                         profile_id = excluded.profile_id,
+                         updated_at = excluded.updated_at"
+                      (assoc-ref entry 'task)
+                      (sql-value (assoc-ref entry 'profile_id)) now))
+             assignments)
+            (studio-list-task-assignments config)))))))

@@ -10,14 +10,21 @@
   #:use-module (json)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-13)
+  #:use-module (web uri)
   #:use-module (app models comfy)
   #:use-module (app models ollama)
   #:use-module (khala config)
   #:use-module (khala engine)
   #:use-module (khala json)
+  #:use-module (khala png)
   #:use-module ((khala studio assets) #:prefix fs:)
   #:use-module ((khala studio persistence) #:prefix db:)
+  #:use-module ((khala studio providers) #:prefix provider:)
+  #:use-module ((khala studio secrets) #:prefix secret:)
   #:export (studio-capabilities
+            studio-create-demo!
+            studio-acceptance-overview
+            studio-run-acceptance!
             studio-list-workplaces
             studio-create-workplace!
             studio-get-workplace
@@ -79,7 +86,22 @@
             studio-restore-version!
             studio-inspire
             studio-prepare-ai
-            studio-run-ai))
+            studio-run-ai
+            studio-model-settings
+            studio-create-model-profile!
+            studio-update-model-profile!
+            studio-delete-model-profile!
+            studio-test-model-profile!
+            studio-discover-model-profile-models
+            studio-update-model-routing!
+            studio-create-embedding-profile!
+            studio-update-embedding-profile!
+            studio-delete-embedding-profile!
+            studio-test-embedding-profile!
+            studio-extract-scene-draft
+            studio-validate-scene-extraction-json
+            studio-confirm-scene-extraction!
+            studio-list-document-scenes))
 
 (define max-content-length 2000000)
 (define max-title-length 512)
@@ -90,6 +112,19 @@
 (define max-character-role-length 256)
 (define max-identity-field-length 20000)
 (define max-scene-text-length 500000)
+(define max-profile-name-length 256)
+(define max-model-id-length 512)
+(define max-base-url-length 2048)
+(define max-api-key-length 4096)
+(define max-profile-json-length 32000)
+(define max-extraction-source-length 2000000)
+(define max-extraction-characters 60)
+
+(define model-protocols
+  '("openai-compatible" "gemini-native" "anthropic-messages" "fake"))
+(define embedding-protocols '("openai-embeddings"))
+(define model-task-keys
+  '("writing" "character_development" "scene_extraction" "storyboard_planning"))
 
 (define scene-statuses '("draft" "ready" "final"))
 (define scene-detail-fields
@@ -310,6 +345,9 @@
                   #t))
            (else (loop (+ index 1) count #f)))))))
 
+(define (sample-workplace-title? title)
+  (and (string? title) (string-prefix? "[SAMPLE]" title)))
+
 (define (public-workplace workplace)
   `(("id" . ,(assoc-ref workplace 'id))
     ("title" . ,(assoc-ref workplace 'title))
@@ -320,7 +358,10 @@
     ("created_at" . ,(assoc-ref workplace 'created_at))
     ("updated_at" . ,(assoc-ref workplace 'updated_at))
     ("last_opened_at" . ,(mark (assoc-ref workplace 'last_opened_at)))
-    ("archived_at" . ,(mark (assoc-ref workplace 'archived_at)))))
+    ("archived_at" . ,(mark (assoc-ref workplace 'archived_at)))
+    ("sample" . ,(and (sample-workplace-title?
+                       (assoc-ref workplace 'title))
+                      #t))))
 
 (define* (public-document document #:key (include-content #f))
   (append
@@ -389,8 +430,9 @@
               ("full_body" . ,(mark (and full-body
                                          (public-asset full-body #:config config))))))))
 
-(define (public-scene scene)
-  `(("id" . ,(assoc-ref scene 'id))
+(define* (public-scene scene #:key (include-source-text #f))
+  (append
+   `(("id" . ,(assoc-ref scene 'id))
     ("workplace_id" . ,(assoc-ref scene 'workplace_id))
     ("title" . ,(assoc-ref scene 'title))
     ("summary" . ,(assoc-ref scene 'summary))
@@ -419,9 +461,23 @@
      . ,(json-string-list (assoc-ref scene 'reference_asset_ids)))
     ("reference_count"
      . ,(length (json-string-list (assoc-ref scene 'reference_asset_ids))))
+    ("source_document_id"
+     . ,(mark (assoc-ref scene 'source_document_id)))
+    ("source_document_version_id"
+     . ,(mark (assoc-ref scene 'source_document_version_id)))
+    ("source_document_revision"
+     . ,(mark (assoc-ref scene 'source_document_revision)))
+    ("source_selection_start"
+     . ,(mark (assoc-ref scene 'source_selection_start)))
+    ("source_selection_end"
+     . ,(mark (assoc-ref scene 'source_selection_end)))
     ("created_at" . ,(assoc-ref scene 'created_at))
     ("updated_at" . ,(assoc-ref scene 'updated_at))
-    ("deleted_at" . ,(mark (assoc-ref scene 'deleted_at)))))
+    ("deleted_at" . ,(mark (assoc-ref scene 'deleted_at))))
+   (if include-source-text
+       `(("source_text_snapshot"
+          . ,(mark (assoc-ref scene 'source_text_snapshot))))
+       '())))
 
 (define (public-scene-cast entry)
   `(("id" . ,(assoc-ref entry 'id))
@@ -527,7 +583,633 @@
       ("default_model" . ,(mark default))
       ("models" . ,models)
       ("ai_available" . ,(and available? #t))
+      ("model_profiles" . ,(map (lambda (profile)
+                                  `(("id" . ,(assoc-ref profile 'id))
+                                    ("name" . ,(assoc-ref profile 'name))
+                                    ("model" . ,(assoc-ref profile 'model_id))
+                                    ("protocol" . ,(assoc-ref profile 'protocol))))
+                                (db:studio-list-model-profiles config)))
       ("image_generation" . ,(studio-image-generation-capabilities config)))))
+
+;; --- Unified LLM / embedding model settings --------------------------------
+
+(define (profile-secret-key kind id)
+  (format #f "~a:~a" kind id))
+
+(define (default-model-capabilities protocol)
+  (case (string->symbol protocol)
+    ((openai-compatible)
+     '(("temperature" . #t) ("top_p" . #t) ("streaming" . #t)
+       ("json" . #t) ("reasoning" . #f)))
+    ((gemini-native)
+     '(("temperature" . #t) ("top_p" . #t) ("streaming" . #t)
+       ("json" . #t) ("reasoning" . #f)))
+    ((anthropic-messages)
+     '(("temperature" . #t) ("top_p" . #t) ("streaming" . #t)
+       ("json" . #f) ("reasoning" . #f)))
+    ((fake)
+     '(("temperature" . #t) ("top_p" . #t) ("streaming" . #t)
+       ("json" . #t) ("reasoning" . #f)))
+    (else '())))
+
+(define model-capability-booleans
+  '("temperature" "top_p" "streaming" "json" "reasoning"))
+(define model-capability-limits
+  '("context_window" "max_output_tokens"))
+
+(define (validate-model-capabilities text)
+  (let ((object (json-string->scm text)))
+    (unless (object? object)
+      (api-fail 400 "VALIDATION_ERROR" "capabilities must be an object"))
+    (for-each
+     (lambda (entry)
+       (let ((key (car entry)) (value (cdr entry)))
+         (cond
+          ((member key model-capability-booleans string=?)
+           (unless (boolean? value)
+             (api-fail 400 "VALIDATION_ERROR"
+                       (format #f "capability ~a must be boolean" key))))
+          ((member key model-capability-limits string=?)
+           (unless (and (integer? value) (> value 0) (<= value 10000000))
+             (api-fail 400 "VALIDATION_ERROR"
+                       (format #f "capability ~a must be a positive integer" key))))
+          (else
+           (api-fail 400 "VALIDATION_ERROR"
+                     (format #f "Unknown capability: ~a" key))))))
+     object)
+    text))
+
+(define (model-profile-capabilities body existing protocol reset-defaults?)
+  (validate-model-capabilities
+   (if reset-defaults?
+       (json-encode (json-normalize (default-model-capabilities protocol)))
+       (profile-json-object
+        body "capabilities"
+        (or (and existing (assoc-ref existing 'capabilities))
+            (json-encode
+             (json-normalize (default-model-capabilities protocol))))))))
+
+(define (default-model-parameters protocol)
+  (case (string->symbol protocol)
+    ((openai-compatible gemini-native anthropic-messages fake)
+     '(("max_output_tokens" . 2048) ("temperature" . 0.7)
+       ("top_p" . 1.0) ("stream" . #t)))
+    (else '())))
+
+(define (profile-json-object body key default)
+  (if (object-has? body key)
+      (let ((value (object-ref body key)))
+        (cond
+         ((not (object? value))
+          (api-fail 400 "VALIDATION_ERROR"
+                    (format #f "~a must be an object" key)))
+         ((> (string-length (json-encode (json-normalize value)))
+             max-profile-json-length)
+          (api-fail 400 "VALIDATION_ERROR"
+                    (format #f "~a is too large" key)))
+         (else (json-encode (json-normalize value)))))
+      default))
+
+(define (profile-custom-headers body default)
+  (if (not (object-has? body "custom_headers"))
+      default
+      (let ((headers (object-ref body "custom_headers")))
+        (unless (object? headers)
+          (api-fail 400 "VALIDATION_ERROR" "custom_headers must be an object"))
+        (for-each
+         (lambda (entry)
+           (let ((name (car entry)) (value (cdr entry)))
+             (unless (and (string? name) (string? value))
+               (api-fail 400 "VALIDATION_ERROR"
+                         "custom_headers must map strings to strings"))
+             (unless (and (not (string-null? (string-trim-both name)))
+                          (not (string-index name #\newline))
+                          (not (string-index name #\return))
+                          (not (string-index value #\newline))
+                          (not (string-index value #\return)))
+               (api-fail 400 "VALIDATION_ERROR"
+                         "custom_headers contains an invalid header"))
+             (let ((lower (string-downcase (string-trim-both name))))
+               (when (member lower
+                             '("authorization" "x-api-key" "api-key"
+                               "x-goog-api-key" "cookie" "proxy-authorization"))
+                 (api-fail 400 "VALIDATION_ERROR"
+                           "Authentication headers belong in api_key, not custom_headers")))))
+         headers)
+        (json-encode (json-normalize headers)))))
+
+(define (valid-provider-url? value)
+  (and (string? value)
+       (not (string-null? value))
+       (<= (string-length value) max-base-url-length)
+       (not (string-index value #\newline))
+       (catch #t
+         (lambda ()
+           (let ((uri (string->uri value)))
+             (and uri
+                  (memq (uri-scheme uri) '(http https))
+                  (string? (uri-host uri))
+                  (not (string-null? (uri-host uri)))
+                  (not (uri-userinfo uri)))))
+         (lambda _ #f))))
+
+(define (validate-model-id value required?)
+  (when (and value (not (string? value)))
+    (api-fail 400 "VALIDATION_ERROR" "model_id must be a string"))
+  (let ((text (if (string? value) (string-trim-both value) "")))
+    (when (and required? (string-null? text))
+      (api-fail 400 "VALIDATION_ERROR" "model_id is required"))
+    (unless (<= (string-length text) max-model-id-length)
+      (api-fail 400 "VALIDATION_ERROR" "model_id is too large"))
+    (when (string-index text #\newline)
+      (api-fail 400 "VALIDATION_ERROR" "model_id contains invalid characters"))
+    text))
+
+(define (profile-enabled-value body default)
+  (if (object-has? body "enabled")
+      (let ((value (object-ref body "enabled")))
+        (unless (boolean? value)
+          (api-fail 400 "VALIDATION_ERROR" "enabled must be a boolean"))
+        value)
+      default))
+
+(define (api-key-input body)
+  (if (object-has? body "api_key")
+      (let ((value (object-ref body "api_key")))
+        (cond ((not (string? value))
+               (api-fail 400 "VALIDATION_ERROR" "api_key must be a string"))
+              ((> (string-length value) max-api-key-length)
+               (api-fail 400 "VALIDATION_ERROR" "api_key is too large"))
+              ((string-null? (string-trim-both value)) #f)
+              (else (string-trim-both value))))
+      'preserve))
+
+(define (profile-api-key config kind id)
+  (secret:studio-secret-get config (profile-secret-key kind id)))
+
+(define (public-model-profile config profile)
+  (let ((key (profile-api-key config "llm" (assoc-ref profile 'id))))
+    `(("id" . ,(assoc-ref profile 'id))
+      ("name" . ,(assoc-ref profile 'name))
+      ("provider" . ,(assoc-ref profile 'provider))
+      ("protocol" . ,(assoc-ref profile 'protocol))
+      ("base_url" . ,(assoc-ref profile 'base_url))
+      ("model_id" . ,(assoc-ref profile 'model_id))
+      ("custom_headers" . ,(identity-from-json
+                            (assoc-ref profile 'custom_headers)))
+      ("timeout_seconds" . ,(assoc-ref profile 'timeout_seconds))
+      ("parameters" . ,(identity-from-json (assoc-ref profile 'parameters)))
+      ("capabilities" . ,(identity-from-json (assoc-ref profile 'capabilities)))
+      ("enabled" . ,(assoc-ref profile 'enabled))
+      ("api_key_configured" . ,(and key #t))
+      ("api_key_masked" . ,(mark (secret:studio-secret-mask key)))
+      ("created_at" . ,(assoc-ref profile 'created_at))
+      ("updated_at" . ,(assoc-ref profile 'updated_at)))))
+
+(define (public-embedding-profile config profile)
+  (let ((key (profile-api-key config "embedding" (assoc-ref profile 'id))))
+    `(("id" . ,(assoc-ref profile 'id))
+      ("name" . ,(assoc-ref profile 'name))
+      ("provider" . ,(assoc-ref profile 'provider))
+      ("protocol" . ,(assoc-ref profile 'protocol))
+      ("base_url" . ,(assoc-ref profile 'base_url))
+      ("model_id" . ,(assoc-ref profile 'model_id))
+      ("dimensions" . ,(mark (assoc-ref profile 'dimensions)))
+      ("batch_size" . ,(assoc-ref profile 'batch_size))
+      ("timeout_seconds" . ,(assoc-ref profile 'timeout_seconds))
+      ("custom_headers" . ,(identity-from-json
+                            (assoc-ref profile 'custom_headers)))
+      ("enabled" . ,(assoc-ref profile 'enabled))
+      ("api_key_configured" . ,(and key #t))
+      ("api_key_masked" . ,(mark (secret:studio-secret-mask key)))
+      ("created_at" . ,(assoc-ref profile 'created_at))
+      ("updated_at" . ,(assoc-ref profile 'updated_at)))))
+
+(define (private-profile config kind profile)
+  (and profile
+       (acons 'api_key
+              (or (profile-api-key config kind (assoc-ref profile 'id)) "")
+              profile)))
+
+(define (assignment-map rows)
+  (map (lambda (task)
+         (let ((entry (find (lambda (row)
+                              (equal? (assoc-ref row 'task) task))
+                            rows)))
+           (cons task (and entry (assoc-ref entry 'profile_id)))))
+       model-task-keys))
+
+(define (json-object-alist? value)
+  (and (list? value)
+       (every (lambda (entry)
+                (and (pair? entry)
+                     (or (string? (car entry)) (symbol? (car entry)))))
+              value)))
+
+(define (public-json-tree value)
+  (cond
+   ((json-object-alist? value)
+    (map (lambda (entry)
+           (cons (if (symbol? (car entry))
+                     (symbol->string (car entry))
+                     (car entry))
+                 (public-json-tree (cdr entry))))
+         value))
+   ((list? value) (map public-json-tree value))
+   ((vector? value) (list->vector (map public-json-tree (vector->list value))))
+   (else value)))
+
+(define (ensure-legacy-model-profile! config)
+  (when (and (null? (db:studio-list-model-profiles config))
+             (equal? (configured-engine config) "fake")
+             (configured-model config))
+    (let* ((id (db:studio-new-id))
+           (model (configured-model config)))
+      (db:studio-create-model-profile!
+       config id
+       `((name . ,(format #f "Legacy Writing Model (~a)" model))
+         (provider . "legacy")
+         (protocol . "fake")
+         (base_url . "fake://local")
+         (model_id . ,model)
+         (custom_headers . "{}")
+         (timeout_seconds . 60)
+         (parameters . ,(json-encode
+                         (json-normalize (default-model-parameters "fake"))))
+         (capabilities . ,(json-encode
+                           (json-normalize
+                            (default-model-capabilities "fake"))))
+         (enabled . #t)))
+      (db:studio-set-setting! config "default_model_profile_id" id)
+      (db:studio-set-task-assignments!
+       config (map (lambda (task) `((task . ,task) (profile_id . ,id)))
+                   model-task-keys)))))
+
+(define (studio-model-settings config)
+  (ensure-legacy-model-profile! config)
+  (let* ((profiles (db:studio-list-model-profiles config))
+         (embedding (db:studio-list-embedding-profiles config))
+         (default-llm (db:studio-get-setting config "default_model_profile_id"))
+         (default-embedding (db:studio-get-setting
+                             config "default_embedding_profile_id"))
+         (setting-value (lambda (value)
+                          (and value
+                               (not (string-null? value))
+                               value))))
+    `(("llm_profiles" . ,(map (lambda (profile)
+                                (public-model-profile config profile))
+                              profiles))
+      ("embedding_profiles" . ,(map (lambda (profile)
+                                      (public-embedding-profile config profile))
+                                    embedding))
+      ("default_llm_profile_id" . ,(mark (setting-value default-llm)))
+      ("default_embedding_profile_id"
+       . ,(mark (setting-value default-embedding)))
+      ("task_assignments" . ,(assignment-map
+                              (db:studio-list-task-assignments config)))
+      ("provider_presets" . ,(public-json-tree provider:studio-provider-presets))
+      ("protocols" . ,(public-json-tree provider:studio-protocol-options))
+      ("tasks" . ,model-task-keys)
+      ("legacy" .
+       (("engine" . ,(configured-engine config))
+        ("model" . ,(mark (configured-model config)))
+        ("fallback_available" . ,(and (configured-model config) #t)))))))
+
+(define (model-profile-values body existing)
+  (let* ((protocol (if (object-has? body "protocol")
+                       (string-field body "protocol" #:required #t)
+                       (and existing (assoc-ref existing 'protocol))))
+         (protocol (or protocol "openai-compatible"))
+         (protocol-changed? (and existing
+                                 (not (equal? protocol
+                                              (assoc-ref existing 'protocol)))))
+         (provider-changed?
+          (and existing
+               (object-has? body "provider")
+               (not (equal? (string-trim-both
+                             (string-field body "provider" #:allow-empty #t
+                                           #:max 128))
+                            (or (assoc-ref existing 'provider) "custom")))))
+         (model-changed?
+          (and existing
+               (object-has? body "model_id")
+               (not (equal? (validate-model-id (object-ref body "model_id")
+                                               (not (equal? protocol "fake")))
+                            (or (assoc-ref existing 'model_id) "")))))
+         (reset-profile-defaults? (or protocol-changed? provider-changed?
+                                      model-changed?)))
+    (unless (member protocol model-protocols)
+      (api-fail 400 "VALIDATION_ERROR" "protocol is not supported"))
+    (let* ((base-default (or (and existing (assoc-ref existing 'base_url)) ""))
+           (base (if (object-has? body "base_url")
+                     (string-field body "base_url" #:allow-empty #t
+                                   #:max max-base-url-length)
+                     base-default))
+           (model-default (or (and existing (assoc-ref existing 'model_id)) ""))
+           (model (validate-model-id
+                   (if (object-has? body "model_id")
+                       (object-ref body "model_id")
+                       model-default)
+                   (not (equal? protocol "fake")))))
+      (unless (or (equal? protocol "fake") (valid-provider-url? base))
+        (api-fail 400 "VALIDATION_ERROR"
+                  "base_url must be an explicit http(s) URL without credentials"))
+      `((name . ,(if (object-has? body "name")
+                     (string-field body "name" #:required #t
+                                   #:max max-profile-name-length)
+                     (and existing (assoc-ref existing 'name))))
+        (provider . ,(if (object-has? body "provider")
+                         (string-field body "provider" #:allow-empty #t
+                                       #:max 128)
+                         (or (and existing (assoc-ref existing 'provider))
+                             "custom")))
+        (protocol . ,protocol)
+        (base_url . ,base)
+        (model_id . ,model)
+        (custom_headers
+         . ,(profile-custom-headers body
+                                    (or (and existing
+                                             (assoc-ref existing 'custom_headers))
+                                        "{}")))
+        (timeout_seconds
+         . ,(if (object-has? body "timeout_seconds")
+                (required-integer-field body "timeout_seconds" 1 300)
+                (or (and existing (assoc-ref existing 'timeout_seconds)) 60)))
+        (parameters
+         . ,(if reset-profile-defaults?
+                (json-encode
+                 (json-normalize (default-model-parameters protocol)))
+                (profile-json-object
+                 body "parameters"
+                 (or (and existing (assoc-ref existing 'parameters))
+                     (json-encode
+                      (json-normalize
+                       (default-model-parameters protocol)))))))
+        (capabilities
+         . ,(model-profile-capabilities body existing protocol
+                                        reset-profile-defaults?))
+        (enabled . ,(profile-enabled-value
+                     body (or (and existing (assoc-ref existing 'enabled)) #t)))))))
+
+(define (require-model-profile config id)
+  (let ((profile (db:studio-get-model-profile
+                  config (require-uuid-in-path id "Model profile"))))
+    (or profile (api-fail 404 "NOT_FOUND" "Model profile not found"))))
+
+(define (store-profile-key! config kind id input existing-id)
+  (cond
+   ((eq? input 'preserve) #t)
+   ((not input)
+    (when (or (not existing-id) (not (equal? id existing-id)))
+      (secret:studio-secret-delete! config (profile-secret-key kind id))))
+   (else (secret:studio-secret-set! config (profile-secret-key kind id) input))))
+
+(define (studio-create-model-profile! config body)
+  (unless (object-has? body "name")
+    (api-fail 400 "VALIDATION_ERROR" "name is required"))
+  (let* ((id (db:studio-new-id))
+         (values (model-profile-values body #f))
+         (key (api-key-input body))
+         (created (db:studio-create-model-profile! config id values)))
+    (store-profile-key! config "llm" id key #f)
+    (public-model-profile config created)))
+
+(define (studio-update-model-profile! config id body)
+  (let* ((profile (require-model-profile config id))
+         (profile-id (assoc-ref profile 'id))
+         (values (model-profile-values body profile))
+         (key (api-key-input body))
+         (updated (db:studio-update-model-profile! config profile-id values)))
+    (store-profile-key! config "llm" profile-id key profile-id)
+    (public-model-profile config updated)))
+
+(define (studio-delete-model-profile! config id)
+  (let* ((profile (require-model-profile config id))
+         (profile-id (assoc-ref profile 'id))
+         (archived (db:studio-archive-model-profile! config profile-id)))
+    (or archived (api-fail 404 "NOT_FOUND" "Model profile not found"))
+    (secret:studio-secret-delete! config (profile-secret-key "llm" profile-id))
+    `(("id" . ,profile-id) ("archived_at" . ,archived))))
+
+(define (provider-error-response key code message details)
+  (if (eq? key 'studio-provider-error)
+      (api-fail (if (equal? code "NETWORK_ERROR") 503 502) code message)
+      (begin
+        (format (current-error-port) "Studio model request failed: ~s~%" key)
+        (api-fail 502 "GENERATION_FAILED" "Model request failed"))))
+
+(define (studio-test-model-profile! config id body)
+  (let* ((profile (private-profile config "llm"
+                                  (require-model-profile config id)))
+         (prompt (optional-string-field (or body '()) "prompt"
+                                         #:max max-instruction-length))
+         (prompt (if (string-null? prompt)
+                     "Reply with the single word OK."
+                     prompt))
+         (messages (list `(("role" . "user") ("content" . ,prompt))))
+         (began (get-internal-real-time)))
+    (catch #t
+      (lambda ()
+        (let ((result (provider:studio-chat-with-profile
+                       profile messages '(("max_output_tokens" . 32)
+                                          ("stream" . #f)))))
+          `(("ok" . #t)
+            ("profile_id" . ,(assoc-ref profile 'id))
+            ("model" . ,(or (assoc-ref profile 'model_id) ""))
+            ("protocol" . ,(assoc-ref profile 'protocol))
+            ("base_url" . ,(or (assoc-ref profile 'base_url) ""))
+            ("preview" . ,(let ((text (or (assoc-ref result 'text) "")))
+                            (substring text 0 (min 160 (string-length text)))))
+            ("elapsed_ms" . ,(quotient
+                              (* (- (get-internal-real-time) began) 1000)
+                              internal-time-units-per-second)))))
+      (lambda (key . args)
+        (if (eq? key 'studio-provider-error)
+            (provider-error-response key (car args) (cadr args) (caddr args))
+            (apply throw key args))))))
+
+(define (studio-discover-model-profile-models config id)
+  (let ((profile (private-profile config "llm"
+                                  (require-model-profile config id))))
+    (catch #t
+      (lambda ()
+        (let ((models (provider:studio-discover-profile-models profile)))
+          `(("models" . ,(list->vector (map json-normalize models))))))
+      (lambda (key . args)
+        (if (eq? key 'studio-provider-error)
+            (provider-error-response key (car args) (cadr args) (caddr args))
+            (apply throw key args))))))
+
+(define (validate-assigned-profile config value task)
+  (cond
+   ((not value) #f)
+   ((not (and (string? value) (valid-uuid? value)))
+    (api-fail 400 "VALIDATION_ERROR"
+              (format #f "~a must be a Model Profile UUID or null" task)))
+   (else
+    (let ((profile (db:studio-get-model-profile config (string-downcase value))))
+      (unless (and profile (assoc-ref profile 'enabled))
+        (api-fail 422 "INVALID_MODEL_PROFILE"
+                  (format #f "~a must reference an enabled Model Profile" task)))
+      (assoc-ref profile 'id)))))
+
+(define (validate-assigned-embedding-profile config value)
+  (cond
+   ((not value) #f)
+   ((not (and (string? value) (valid-uuid? value)))
+    (api-fail 400 "VALIDATION_ERROR"
+              "default_embedding_profile_id must be an Embedding Profile UUID or null"))
+   (else
+    (let ((profile (db:studio-get-embedding-profile
+                    config (string-downcase value))))
+      (unless (and profile (assoc-ref profile 'enabled))
+        (api-fail 422 "INVALID_MODEL_PROFILE"
+                  "default_embedding_profile_id must reference an enabled Embedding Profile"))
+      (assoc-ref profile 'id)))))
+
+(define (studio-update-model-routing! config body)
+  (let* ((body (or body '()))
+         (default-input (and (object-has? body "default_profile_id")
+                             (object-ref body "default_profile_id")))
+         (default (validate-assigned-profile config default-input "default_profile_id"))
+         (embedding-default-input
+          (and (object-has? body "default_embedding_profile_id")
+               (object-ref body "default_embedding_profile_id")))
+         (embedding-default
+          (validate-assigned-embedding-profile config embedding-default-input))
+         (tasks (object-ref body "tasks"))
+         (assignments '()))
+    (when (object-has? body "tasks")
+      (unless (object? tasks)
+        (api-fail 400 "VALIDATION_ERROR" "tasks must be an object"))
+      (for-each
+       (lambda (entry)
+         (unless (member (car entry) model-task-keys)
+           (api-fail 400 "VALIDATION_ERROR"
+                     (format #f "Unknown model task: ~a" (car entry))))
+         (unless (or (not (cdr entry)) (string? (cdr entry)))
+           (api-fail 400 "VALIDATION_ERROR"
+                     (format #f "~a must be a profile UUID or null" (car entry))))
+         (set! assignments
+               (cons `((task . ,(car entry))
+                       (profile_id . ,(validate-assigned-profile
+                                       config (cdr entry) (car entry))))
+                     assignments)))
+       tasks))
+    (when (object-has? body "default_profile_id")
+      (db:studio-set-setting! config "default_model_profile_id" (or default "")))
+    (when (object-has? body "default_embedding_profile_id")
+      (db:studio-set-setting! config "default_embedding_profile_id"
+                              (or embedding-default "")))
+    (unless (null? assignments)
+      (db:studio-set-task-assignments! config (reverse assignments)))
+    (studio-model-settings config)))
+
+(define (embedding-profile-values body existing)
+  (let* ((protocol (if (object-has? body "protocol")
+                       (string-field body "protocol" #:required #t)
+                       (or (and existing (assoc-ref existing 'protocol))
+                           "openai-embeddings")))
+         (base-default (or (and existing (assoc-ref existing 'base_url)) ""))
+         (base (if (object-has? body "base_url")
+                   (string-field body "base_url" #:allow-empty #t
+                                 #:max max-base-url-length)
+                   base-default))
+         (model-default (or (and existing (assoc-ref existing 'model_id)) ""))
+         (model (validate-model-id
+                 (if (object-has? body "model_id") (object-ref body "model_id")
+                     model-default)
+                 #t))
+         (dimensions
+          (if (object-has? body "dimensions")
+              (let ((value (object-ref body "dimensions")))
+                (cond ((not value) #f)
+                      ((not (integer? value)) (api-fail 400 "VALIDATION_ERROR" "dimensions must be an integer or null"))
+                      ((or (< value 1) (> value 65536)) (api-fail 400 "VALIDATION_ERROR" "dimensions is out of range"))
+                      (else value)))
+              (and existing (assoc-ref existing 'dimensions)))))
+    (unless (member protocol embedding-protocols)
+      (api-fail 400 "VALIDATION_ERROR" "Embedding protocol is not supported"))
+    (unless (valid-provider-url? base)
+      (api-fail 400 "VALIDATION_ERROR"
+                "base_url must be an explicit http(s) URL without credentials"))
+    `((name . ,(if (object-has? body "name")
+                   (string-field body "name" #:required #t
+                                 #:max max-profile-name-length)
+                   (and existing (assoc-ref existing 'name))))
+      (provider . ,(if (object-has? body "provider")
+                       (string-field body "provider" #:allow-empty #t #:max 128)
+                       (or (and existing (assoc-ref existing 'provider)) "custom")))
+      (protocol . ,protocol)
+      (base_url . ,base)
+      (model_id . ,model)
+      (dimensions . ,dimensions)
+      (batch_size . ,(if (object-has? body "batch_size")
+                         (required-integer-field body "batch_size" 1 256)
+                         (or (and existing (assoc-ref existing 'batch_size)) 16)))
+      (timeout_seconds . ,(if (object-has? body "timeout_seconds")
+                              (required-integer-field body "timeout_seconds" 1 300)
+                              (or (and existing (assoc-ref existing 'timeout_seconds)) 60)))
+      (custom_headers . ,(profile-custom-headers
+                          body (or (and existing (assoc-ref existing 'custom_headers))
+                                   "{}")))
+      (enabled . ,(profile-enabled-value
+                   body (or (and existing (assoc-ref existing 'enabled)) #t))))))
+
+(define (require-embedding-profile config id)
+  (let ((profile (db:studio-get-embedding-profile
+                  config (require-uuid-in-path id "Embedding profile"))))
+    (or profile (api-fail 404 "NOT_FOUND" "Embedding profile not found"))))
+
+(define (studio-create-embedding-profile! config body)
+  (unless (object-has? body "name")
+    (api-fail 400 "VALIDATION_ERROR" "name is required"))
+  (let* ((id (db:studio-new-id))
+         (values (embedding-profile-values body #f))
+         (key (api-key-input body))
+         (created (db:studio-create-embedding-profile! config id values)))
+    (store-profile-key! config "embedding" id key #f)
+    (public-embedding-profile config created)))
+
+(define (studio-update-embedding-profile! config id body)
+  (let* ((profile (require-embedding-profile config id))
+         (profile-id (assoc-ref profile 'id))
+         (values (embedding-profile-values body profile))
+         (key (api-key-input body))
+         (updated (db:studio-update-embedding-profile! config profile-id values)))
+    (store-profile-key! config "embedding" profile-id key profile-id)
+    (public-embedding-profile config updated)))
+
+(define (studio-delete-embedding-profile! config id)
+  (let* ((profile (require-embedding-profile config id))
+         (profile-id (assoc-ref profile 'id))
+         (archived (db:studio-archive-embedding-profile! config profile-id)))
+    (or archived (api-fail 404 "NOT_FOUND" "Embedding profile not found"))
+    (secret:studio-secret-delete! config (profile-secret-key "embedding" profile-id))
+    `(("id" . ,profile-id) ("archived_at" . ,archived))))
+
+(define (studio-test-embedding-profile! config id body)
+  (let* ((profile (private-profile config "embedding"
+                                  (require-embedding-profile config id)))
+         (text (optional-string-field (or body '()) "text"
+                                       #:max max-context-length))
+         (text (if (string-null? text)
+                   "Khala Studio embedding connection test."
+                   text)))
+    (catch #t
+      (lambda ()
+        (let ((result (provider:studio-embedding-with-profile profile text)))
+          `(("ok" . #t)
+            ("profile_id" . ,(assoc-ref profile 'id))
+            ("model" . ,(assoc-ref result 'model))
+            ("dimensions" . ,(assoc-ref result 'dimensions))
+            ("sample" . ,(list-head (assoc-ref result 'vector)
+                                    (min 3 (length (assoc-ref result 'vector)))))
+            ("protocol" . ,(assoc-ref profile 'protocol)))))
+      (lambda (key . args)
+        (if (eq? key 'studio-provider-error)
+            (provider-error-response key (car args) (cadr args) (caddr args))
+            (apply throw key args))))))
 
 (define (studio-list-workplaces config)
   (map public-workplace (db:studio-list-workplaces config)))
@@ -585,6 +1267,653 @@
         (public-workplace workplace)
         (public-workplace
          (db:studio-update-workplace! config workplace-id updates)))))
+
+;; --- Prototype sample and manual model acceptance -------------------------
+
+(define demo-workplace-title "[SAMPLE] The Last Lamp")
+
+(define (demo-fill! pixels width height x0 y0 x1 y1 red green blue)
+  (do ((y (max 0 y0) (+ y 1))) ((>= y (min height y1)))
+    (do ((x (max 0 x0) (+ x 1))) ((>= x (min width x1)))
+      (let ((offset (+ (* y width 3) (* x 3))))
+        (bytevector-u8-set! pixels offset red)
+        (bytevector-u8-set! pixels (+ offset 1) green)
+        (bytevector-u8-set! pixels (+ offset 2) blue)))))
+
+(define (demo-illustrative-png)
+  (let* ((width 768)
+         (height 432)
+         (pixels (make-bytevector (* width height 3) 0)))
+    (demo-fill! pixels width height 0 0 width height 232 220 196)
+    (demo-fill! pixels width height 0 310 width height 157 126 94)
+    (demo-fill! pixels width height 58 62 292 292 38 48 55)
+    (demo-fill! pixels width height 76 80 274 274 65 82 91)
+    (demo-fill! pixels width height 104 108 246 246 202 173 120)
+    (demo-fill! pixels width height 498 168 618 308 105 69 50)
+    (demo-fill! pixels width height 514 184 602 292 218 177 105)
+    (demo-fill! pixels width height 540 206 576 288 244 221 160)
+    (demo-fill! pixels width height 166 180 214 310 61 56 49)
+    (demo-fill! pixels width height 182 144 198 180 211 183 148)
+    (demo-fill! pixels width height 318 172 372 310 57 71 81)
+    (demo-fill! pixels width height 334 138 354 174 207 181 157)
+    (demo-fill! pixels width height 452 192 492 306 50 88 71)
+    (demo-fill! pixels width height 462 162 482 194 195 157 120)
+    (demo-fill! pixels width height 0 386 width 432 51 40 34)
+    (png-add-text
+     (rgb->png width height pixels)
+     "Comment"
+     "Khala Studio illustrative sample; not generated by an image model.")))
+
+(define (demo-character! config workplace-id name role summary concept
+                         literary visual vocal performance outfit)
+  (let* ((character-id (db:studio-new-id))
+         (character (db:studio-create-character!
+                     config character-id workplace-id name role summary
+                     (identity-to-json literary)
+                     (identity-to-json visual)
+                     (identity-to-json vocal)
+                     (identity-to-json performance)
+                     #:concept concept)))
+    (let ((outfit (db:studio-create-character-outfit!
+                   config (db:studio-new-id) workplace-id character-id
+                   (append
+                    `((name . ,(assoc-ref outfit 'name))
+                      (kind . ,(assoc-ref outfit 'kind))
+                      (description . ,(assoc-ref outfit 'description))
+                      (image_prompt . ,(assoc-ref outfit 'image_prompt))
+                      (is_default . #t))
+                    (map (lambda (key)
+                           (cons key
+                                 (string-list-json (assoc-ref outfit key))))
+                         '(components materials colors accessories
+                           special_features))))))
+      (cons character outfit))))
+
+(define (demo-storyboard-shots nira-id orin-id tam-id)
+  (let ((ids (list nira-id orin-id tam-id)))
+    (map
+     (lambda (index)
+       (let* ((beat
+               (list-ref
+                '(("The lamp keeper refuses the surveyor's warning as the tide reaches the gate."
+                   "Nira keeps one hand on the lamp mechanism and stands between Orin and the stair."
+                   nira
+                   ("Nira Vale")
+                   "Controlled anger; gaze fixed on the oil trail."
+                   "Still posture, then a sharp turn toward the door as water crosses the threshold."
+                   "Wide establishing frame from the tide gate; figures small against black water."
+                   "A wide cinematic 16:9 frame of a stone tide gate at night, a woman in a charcoal oilskin coat guarding a brass lamp mechanism while a blue-coated surveyor waits below.")
+                  ("The apprentice exposes a broken seal and forces the lie into the open."
+                   "Tam holds up the seal; Orin looks away, caught between relief and guilt."
+                   all
+                   ("Nira Vale" "Orin Sable" "Tam Rhee")
+                   "Tam is frightened but determined; Orin's jaw tightens."
+                   "Tam steps forward, then retreats half a pace when Nira turns."
+                   "Tight three-shot across a scarred workbench, warm lamp light on brass."
+                   "A tight cinematic 16:9 three-shot around a wooden workbench, an apprentice presenting a broken brass seal while two adults avoid each other's eyes.")
+                  ("Nira relights the lamp before she answers Orin."
+                   "The flame reveals the flooded floor and the truth Orin tried to hide."
+                   nira-orin
+                   ("Nira Vale" "Orin Sable")
+                   "Nira's fear settles into resolve; Orin squints against the light."
+                   "Nira kneels to shield the flame, then rises without looking at him."
+                   "Low angle on the lamp flare, long silhouettes crossing the tide gate."
+                   "A low-angle cinematic 16:9 frame as a brass lamp flares with warm light in a flooded stone chamber, silhouettes stretching across the wet floor.")
+                  ("At the threshold, Nira chooses what the lamp will remember."
+                   "Nira closes the lamp shutter and names the price of Orin's help."
+                   nira
+                   ("Nira Vale")
+                   "Quiet exhaustion with a new resolve."
+                   "She stands alone, palms flat on the lamp housing, breathing measured."
+                   "Close profile with the dark tide gate soft behind her."
+                   "A close cinematic 16:9 profile of a lamp keeper in a charcoal coat, palms flat on a brass lamp, warm light fading across her face."))
+                index))
+             (selection (list-ref beat 2))
+             (ids (case selection
+                    ((all) (list nira-id orin-id tam-id))
+                    ((nira-orin) (list nira-id orin-id))
+                    (else (list nira-id))))
+             (names (case selection
+                      ((all) (list "Nira Vale" "Orin Sable" "Tam Rhee"))
+                      ((nira-orin) (list "Nira Vale" "Orin Sable"))
+                      (else (list "Nira Vale")))))
+         `(("id" . ,(db:studio-new-id))
+           ("number" . ,(+ index 1))
+           ("dramatic_beat" . ,(list-ref beat 0))
+           ("action" . ,(list-ref beat 1))
+           ("content" . ,(list-ref beat 1))
+           ("character_ids" . ,ids)
+           ("characters" . ,names)
+           ("camera" . ,(list-ref beat 6))
+           ("expression" . ,(list-ref beat 4))
+           ("performance" . ,(list-ref beat 5))
+           ("expression_action" . ,(string-join (list (list-ref beat 4)
+                                                     (list-ref beat 5))
+                                                "\n\n"))
+           ("visual_description" . ,(list-ref beat 7))
+           ("image_prompt" . ,(list-ref beat 7))
+           ("asset_id" . null)
+           ("file_url" . null)
+           ("status" . "pending")
+           ("source" . "sample")
+           ("model" . "sample")
+           ("character_outfits" . ())
+           ("reference_usage" . null)
+           ("author_edited" . #f))))
+     (iota 4))))
+
+(define (demo-payload config created)
+  (let* ((workplace (find (lambda (item)
+                            (equal? (assoc-ref item 'title)
+                                    demo-workplace-title))
+                          (db:studio-list-workplaces config)))
+         (wid (and workplace (assoc-ref workplace 'id)))
+         (characters (and wid (db:studio-list-characters config wid)))
+         (documents (and wid (db:studio-list-documents config wid)))
+         (scenes (and wid (db:studio-list-scenes config wid)))
+         (document (and documents (car documents)))
+         (scene (and scenes (car scenes)))
+         (assets (and wid (db:studio-list-assets config wid)))
+         (asset (find (lambda (item)
+                        (equal? (assoc-ref item 'source) "imported"))
+                      assets)))
+    `(("created" . ,(and created #t))
+      ("workplace" . ,(public-workplace workplace))
+      ("characters" . ,(map (lambda (character)
+                              (public-character-with-avatar config character))
+                            (or characters '())))
+      ("document" . ,(and document (public-document document
+                                                     #:include-content #t)))
+      ("scene" . ,(and scene (public-scene scene #:include-source-text #t)))
+      ("cast" . ,(if scene
+                     (map public-scene-cast
+                          (db:studio-list-scene-cast config wid
+                                                   (assoc-ref scene 'id)))
+                     '()))
+      ("storyboard" . ,(and scene (storyboard-payload config scene)))
+      ("asset" . ,(and asset (public-asset asset #:include-links #t
+                                           #:config config)))
+      ("note" . "示例资料独立存放于 [SAMPLE] Workplace；图片是明确标注的示意占位，不是图像模型生成结果。"))))
+
+(define (studio-create-demo! config)
+  (let ((existing (find (lambda (item)
+                          (equal? (assoc-ref item 'title)
+                                  demo-workplace-title))
+                        (db:studio-list-workplaces config))))
+    (if existing
+        (demo-payload config #f)
+        (let* ((workplace
+                (db:studio-create-workplace!
+                 config (db:studio-new-id) demo-workplace-title
+                 "一个可完整演示的示例故事：从人物、正文、Scene 到 Storyboard 与图片资源。"
+                 "#713D3B" #f))
+               (wid (assoc-ref workplace 'id))
+               (nira
+                (demo-character!
+                 config wid "Nira Vale" "Lamp Keeper"
+                 "守着潮门最后一盏灯的机械师；不肯承认自己需要别人。"
+                 "Nira inherited the tide-gate lamp from her mother and has kept it burning for eleven years. She believes the harbor survives because someone stays awake, not because anyone is rescued."
+                 `((background . "Raised in the tide-gate workshop after the harbor surveys were abandoned.")
+                   (personality . "Watchful, exacting, privately generous; she tests people by what they do when no one thanks them.")
+                   (values . "Steadiness, craft, and keeping a light for people who cannot repay it.")
+                   (motivations . "To keep the lamp and the harbor from becoming another official ruin.")
+                   (fears . "That accepting help will prove she cannot hold the gate alone.")
+                   (goals . "Find who opened the lamp valve before the next high tide.")
+                   (relationships . "Orin was once her closest ally; Tam is the apprentice she pretends not to protect.")
+                   (arc . "From guarding the light alone to deciding who is allowed to share the watch."))
+                 `((standard_appearance . "A compact lamp keeper in a long charcoal oilskin coat, soot-dark cuffs and a brass lamp key at her throat.")
+                   (face . "Angular face, a thin scar through the left eyebrow, amber eyes set in a habitual squint against lamplight.")
+                   (body . "Lean and strong-shouldered, with the slight asymmetry of years spent carrying lamp housings.")
+                   (hair . "Dark auburn hair braided low and tied with a faded oxblood ribbon.")
+                   (eyes . "Amber; direct and unblinking when challenged.")
+                   (skin . "Warm weathered skin, freckled across the nose, soot on the knuckles.")
+                   (distinctive_features . "Thin scar through the left eyebrow and a brass lamp key worn outside the coat.")
+                   (clothing . "Charcoal oilskin work coat, dark trousers, leather boots and a repaired oxblood scarf.")
+                   (palette . "Charcoal, oxblood, aged brass and sea-grey.")
+                   (expressions . "Anger reads as stillness; tenderness appears only in the way she lowers her voice.")
+                   (posture . "Grounded stance, one shoulder slightly forward, hands never far from a tool."))
+                 `((voice_character . "Low and dry, with the cadence of someone used to giving instructions across weather.")
+                   (timbre . "Warm-grained, slightly rough from lamp smoke.")
+                   (range . "Narrow middle register; drops lower when frightened.")
+                   (pitch . "Low for her build.")
+                   (accent . "Tide-gate harbor accent, clipped and practical.")
+                   (pronunciation . "Precise consonants; shortens official names with visible impatience.")
+                   (pace . "Measured, with long pauses before personal answers.")
+                   (speech_habits . "Names lamp parts by number and avoids saying 'help' aloud."))
+                 `((habits . "Checks the lamp shutter twice before leaving a room.")
+                   (movement . "Economical, deliberate; crosses a room by the shortest safe line.")
+                   (gestures . "Taps the brass key against her thumb while thinking.")
+                   (emotional_responses . "Withdraws into precision when threatened; becomes blunt and honest when exhausted.")
+                   (behavioral_traits . "Fixes a small visible problem before addressing the larger danger.")
+                   (typical_reactions . "Positions herself between an exit and whoever she is protecting.")
+                   (situations . "Defiant under authority, patient with Tam, unguarded only in the lamp room after midnight."))
+                 '((name . "Harbor Workwear")
+                   (kind . "standard")
+                   (description . "The practical silhouette Nira wears for every night watch.")
+                   (components . ("charcoal oilskin coat" "dark work trousers"
+                                  "reinforced leather boots" "oxblood scarf"))
+                   (materials . ("waxed canvas" "wool" "leather" "brass"))
+                   (colors . ("charcoal" "oxblood" "aged brass" "sea-grey"))
+                   (accessories . ("brass lamp key" "small tool case" "lamp gloves"))
+                   (special_features . ("ribbon-repaired cuff" "soot-dark left shoulder"))
+                   (image_prompt . "Full-length character design of Nira Vale in a charcoal oilskin work coat, oxblood scarf, brass lamp key and weathered leather boots, warm editorial backdrop."))))
+               (orin
+                (demo-character!
+                 config wid "Orin Sable" "Harbor Surveyor"
+                 "回来复核潮门的测量员；带着一个迟到十一年的答案。"
+                 "Orin left the harbor to work for the regional survey office. He returns with a repair order that would close the tide gate and a confession he cannot deliver cleanly."
+                 `((background . "Former harbor apprentice who left after a failed survey and built a career in the capital.")
+                   (personality . "Careful, apologetic in words, evasive in action; he believes documentation can repair what people cannot.")
+                   (values . "Accuracy, public safety and the possibility of earning forgiveness through procedure.")
+                   (motivations . "To close the gate safely and be believed when he says the old lamp cannot be trusted.")
+                   (fears . "That Nira will see the order as another abandonment and that he will deserve it.")
+                   (goals . "Get Nira to sign the survey and evacuate the lower harbor before the tide.")
+                   (relationships . "Once Nira's closest ally; now the bearer of an official order that may destroy her life's work.")
+                   (arc . "From hiding behind the survey to admitting he helped create the danger."))
+                 `((eyes . "Pale grey eyes that avoid direct contact when he lies.")
+                   (skin . "Pale windburned skin, ink stains on the right hand.")
+                   (distinctive_features . "Brass compass on a long chain and a repaired split in the map case.")
+                   (clothing . "Midnight-blue survey coat, grey waistcoat, leather map satchel, brass compass.")
+                   (palette . "Midnight blue, slate grey, worn leather and brass.")
+                   (expressions . "Relief looks almost like grief; guilt makes him over-explain.")
+                   (posture . "Tall and slightly stooped, as if always folding into a doorway."))
+                 `((voice_character . "Polished and careful, with a habit of softening bad news into procedure.")
+                   (timbre . "Clear, light and slightly nasal.")
+                   (range . "Wide enough for formal reports; thins when he is caught lying.")
+                   (pitch . "Mid-range.")
+                   (accent . "Capital diction laid over a trace of harbor vowels.")
+                   (pronunciation . "Over-precise technical terms; the harbor accent surfaces on names.")
+                   (pace . "Even, then too fast when he is defending himself.")
+                   (speech_habits . "Begins sentences with 'the survey says' when he is afraid."))
+                 `((habits . "Rechecks the compass even when he knows the bearing.")
+                   (movement . "Long strides that stop abruptly at thresholds.")
+                   (gestures . "Turns the compass chain around one finger while listening.")
+                   (emotional_responses . "Retreats into paperwork when ashamed; becomes unexpectedly direct when the danger is physical.")
+                   (behavioral_traits . "Documents everything, including things he would rather forget.")
+                   (typical_reactions . "Apologises first, then tries to solve the practical problem.")
+                   (situations . "Formal with officials, faltering with Nira, gentle and clumsy with Tam."))
+                 '((name . "Surveyor's Field Dress")
+                   (kind . "standard")
+                   (description . "Orin's official field silhouette, built for wind, rain and paperwork.")
+                   (components . ("midnight-blue survey coat" "grey waistcoat"
+                                  "leather map satchel" "brass compass"))
+                   (materials . ("wool" "leather" "brass" "paper"))
+                   (colors . ("midnight blue" "slate grey" "worn leather" "brass"))
+                   (accessories . ("brass compass" "folded survey" "ink pen"))
+                   (special_features . ("repaired map-case split" "red survey seal"))
+                   (image_prompt . "Full-length character design of Orin Sable in a midnight-blue survey coat, grey waistcoat, leather map satchel and brass compass, warm editorial backdrop."))))
+               (tam
+                (demo-character!
+                 config wid "Tam Rhee" "Lamp Apprentice"
+                 "在潮门长大的年轻学徒；比两个成年人都更早看见真相。"
+                 "Tam keeps the lamp wicks and the workshop ledgers. They are quicker with details than with confrontation, but they will not let a dangerous lie pass unchallenged."
+                 `((background . "Grew up in the lower harbor and came to the lamp workshop after the last flood took their family's shop.")
+                   (personality . "Curious, observant and braver than they believe; jokes when nervous.")
+                   (values . "Fairness, practical care and not letting the same mistake happen twice.")
+                   (motivations . "To be trusted with real responsibility rather than protected from it.")
+                   (fears . "Being sent away when the adults decide the danger is too large.")
+                   (goals . "Prove that the lamp was opened from inside and keep Nira from facing the truth alone.")
+                   (relationships . "Looks to Nira as a teacher and to Orin as proof that clever people can still be wrong.")
+                   (arc . "From carrying messages to speaking the truth in front of both adults."))
+                 `((standard_appearance . "A young apprentice in patched canvas layers and a green wool scarf, always carrying a ledger.")
+                   (face . "Open face with a small chin scar and quick dark eyes.")
+                   (body . "Small, wiry build; moves faster than expected in cramped spaces.")
+                   (hair . "Short-cropped black hair with a stubborn cowlick.")
+                   (eyes . "Dark brown, alert and constantly measuring the room.")
+                   (skin . "Warm copper skin, ink-stained fingertips.")
+                   (distinctive_features . "Small chin scar and a green scarf knitted too long.")
+                   (clothing . "Patched canvas jacket, rolled sleeves, green wool scarf and a canvas ledger satchel.")
+                   (palette . "Moss green, canvas tan, ink black and brass.")
+                   (expressions . "Fear shows as a rush of words; resolve shows as sudden quiet.")
+                   (posture . "Perched forward, ready to move or hand something over."))
+                 `((voice_character . "Bright and quick, with a habit of finishing a thought before it is welcome.")
+                   (timbre . "Clear and slightly breathless.")
+                   (range . "Light middle register with an easy upward break.")
+                   (pitch . "Higher than the adults without sounding childish.")
+                   (accent . "Lower-harbor accent, softened by reading.")
+                   (pronunciation . "Trips over long official words, then repeats them perfectly.")
+                   (pace . "Fast, with sudden stops when Nira looks at them.")
+                   (speech_habits . "Says 'the ledger says' when nervous."))
+                 `((habits . "Writes the time on every new page before using it.")
+                   (movement . "Quick, light steps; slips sideways through narrow gaps.")
+                   (gestures . "Holds the ledger against their chest when uncertain.")
+                   (emotional_responses . "Talks faster when afraid; goes very still when deciding to disobey.")
+                   (behavioral_traits . "Notices mismatched numbers before mismatched moods.")
+                   (typical_reactions . "Checks whether they are believed before saying anything else.")
+                   (situations . "Eager with Orin, defensive with Nira, steady when the lamp is actually failing."))
+                 '((name . "Apprentice Layers")
+                   (kind . "standard")
+                   (description . "Tam's patched working clothes, chosen for lamp rooms and cold stairs.")
+                   (components . ("patched canvas jacket" "rolled work shirt"
+                                  "green wool scarf" "ledger satchel"))
+                   (materials . ("canvas" "wool" "leather" "paper"))
+                   (colors . ("moss green" "canvas tan" "ink black" "brass"))
+                   (accessories . ("lamp wick knife" "ink pencil" "ledger satchel"))
+                   (special_features . ("overlong hand-knitted scarf" "ink-stained cuffs"))
+                   (image_prompt . "Full-length character design of Tam Rhee, a young lamp apprentice in patched canvas layers, moss-green scarf and a ledger satchel, warm editorial backdrop."))))
+               (story
+                (string-join
+                 '("# The Last Lamp"
+                   ""
+                   "The tide gate had been dark for eleven years when Nira heard the surveyor's boots on the stair."
+                   ""
+                   "She did not turn from the lamp. Its brass housing was warm under her palm, the shutter breathing a thin gold line across the flooded stone. Behind her, Tam stopped writing. The ledger pages rustled once and went still."
+                   ""
+                   "\"The office has signed the closure,\" Orin said. \"The lower gate comes down before midnight. You need to leave the lamp.\""
+                   ""
+                   "Nira looked at the oil trail on the floor. It began at the lamp valve, crossed the threshold and ended under Orin's boot. \"You came a long way to tell me something I already know.\""
+                   ""
+                   "Tam stepped out from the workbench with a broken brass seal in their palm. \"It was opened from inside,\" they said. \"The ledger says the valve was shut at dusk. This seal was cut after.\""
+                   ""
+                   "Orin's hand went to the compass at his chest. He did not open it. \"The survey was wrong eleven years ago,\" he said. \"I signed a report that said this gate could hold. I have been trying to correct it ever since.\""
+                   ""
+                   "The water crossed the first step. Nira struck a match. The flame caught, and the tide gate filled with a light that made every lie visible."
+                   ""
+                   "\"Then correct it here,\" she said. \"Before the tide decides what your signature is worth.\"")
+                 "\n"))
+               (document
+                (db:studio-create-document!
+                 config (db:studio-new-id) wid #f "manuscript"
+                 "The Last Lamp" story "markdown" 0))
+               (version-id (db:studio-new-id))
+               (_version
+                (db:studio-create-version! config wid (assoc-ref document 'id)
+                                           version-id "Opening Conflict"
+                                           "checkpoint"))
+               (excerpt "The tide gate had been dark for eleven years when Nira heard the surveyor's boots on the stair.")
+               (excerpt-start (string-contains story excerpt))
+               (excerpt-end (+ excerpt-start (string-length excerpt)))
+               (scene-id (db:studio-new-id))
+               (scene
+                (db:studio-create-extracted-scene!
+                 config scene-id wid
+                 `((title . "The Lamp at the Tide Gate")
+                   (summary . "Nira, Orin and Tam confront the broken seal while the tide rises and an old betrayal becomes actionable.")
+                   (sort_order . 1)
+                   (status . "ready")
+                   (time . "Eleven years after the lower harbor flood; shortly before midnight")
+                   (place . "The tide-gate lamp room")
+                   (environment . "Black water crossing the stone floor, one warm lamp, cold air from the open stair.")
+                   (background . "The harbor survey office has ordered the lower gate closed and the lamp abandoned.")
+                   (prior_events . "Tam discovered that the lamp valve had been opened from inside after dusk.")
+                   (central_question . "Will Nira accept Orin's help before the tide makes the choice for them?")
+                   (primary_conflict . "Nira needs the truth and the lamp; Orin needs absolution through procedure; neither can move without admitting dependence.")
+                   (turn . "Tam reveals the broken seal, proving the danger was set in motion inside the lamp room.")
+                   (dialogue . "ORIN\nThe office has signed the closure. You need to leave the lamp.\n\nNIRA\nYou came a long way to tell me something I already know.\n\nTAM\nIt was opened from inside. This seal was cut after dusk.\n\nNIRA\nThen correct it here, before the tide decides what your signature is worth.")
+                   (blocking . "Nira stays beside the lamp; Orin remains below the threshold; Tam moves between the workbench and the oil trail.")
+                   (spatial . "The lamp housing dominates the room. The stair and the rising water create a narrow corridor between the three figures.")
+                   (performance_direction . "Keep the adults still and let Tam's movement carry the turn. The lamp flare should feel like an answer, not a spectacle.")
+                   (camera . "Begin wide from the tide gate, move to a three-shot at the workbench, then hold a low close-up on the relit lamp.")
+                   (source_document_id . ,(assoc-ref document 'id))
+                   (source_document_version_id . ,version-id)
+                   (source_document_revision . ,(assoc-ref document 'revision))
+                   (source_text_snapshot . ,excerpt)
+                   (source_selection_start . ,excerpt-start)
+                   (source_selection_end . ,excerpt-end))
+                 (list
+                  `((character_id . ,(assoc-ref (car nira) 'id))
+                    (objective . "Keep the lamp burning and force Orin to tell the truth without asking for help.")
+                    (action . "She holds the lamp mechanism and refuses to step away from it.")
+                    (conflict . "Orin's official order and the rising water make independence impossible.")
+                    (emotional_state . "Controlled anger over fear.")
+                    (performance_direction . "Still hands; one sharp turn when the seal appears.")
+                    (subtext . "She has already decided to relight the lamp; she is waiting to see who will stay.")
+                    (sort_order . 0))
+                  `((character_id . ,(assoc-ref (car orin) 'id))
+                    (objective . "Get Nira to sign the closure and leave before the gate fails.")
+                    (action . "He presents the order, avoids the oil trail and finally admits his old report was wrong.")
+                    (conflict . "Nira's refusal and Tam's evidence make procedure useless.")
+                    (emotional_state . "Guilt disguised as calm.")
+                    (performance_direction . "He touches the compass but never opens it.")
+                    (subtext . "He wants forgiveness more than compliance.")
+                    (sort_order . 1))
+                  `((character_id . ,(assoc-ref (car tam) 'id))
+                    (objective . "Make the adults see the broken seal before it is too late.")
+                    (action . "They step forward with the seal, then retreat half a pace.")
+                    (conflict . "They are afraid of being dismissed as a child.")
+                    (emotional_state . "Fear held together by determination.")
+                    (performance_direction . "Quick words, then sudden stillness after presenting the seal.")
+                    (subtext . "They need to be trusted with what they already know.")
+                    (sort_order . 2)))))
+               (asset-id (db:studio-new-id))
+               (storage-key (fs:studio-asset-storage-key asset-id ".png"))
+               (png-bytes (demo-illustrative-png))
+               (checksum
+                (catch #t
+                  (lambda ()
+                    (fs:studio-asset-store-file! config storage-key png-bytes))
+                  (lambda (key . args)
+                    (apply throw key args))))
+               (asset
+                (catch #t
+                  (lambda ()
+                    (db:studio-create-asset!
+                     config asset-id wid
+                     `((name . "Tide Gate — Illustrative Storyboard Plate")
+                       (description . "示例用途的示意画面，用于演示 Scene 与 Asset 关联；不是图像模型生成结果。")
+                       (asset_type . "image")
+                       (storage_key . ,storage-key)
+                       (original_filename . "sample-tide-gate.png")
+                       (mime_type . "image/png")
+                       (file_size . ,(bytevector-length png-bytes))
+                       (checksum . ,checksum)
+                       (source . "imported")
+                       (width . 768)
+                       (height . 432)
+                       (duration_ms . #f)
+                       (author . "Khala Studio sample")
+                       (notes . "Illustrative placeholder only. generated_by_model=false; engine=fake.")
+                       (generation_metadata
+                        . ,(json-encode
+                            (json-normalize
+                             '(("sample" . #t)
+                               ("illustrative" . #t)
+                               ("provenance" . "illustrative placeholder")
+                               ("generated_by_model" . #f)
+                               ("engine" . "fake")
+                               ("workplace_title" . "[SAMPLE] The Last Lamp")))))
+                       (tags . ("sample" "illustrative" "storyboard")))))
+                  (lambda (key . args)
+                    (fs:studio-asset-delete-file! config storage-key)
+                    (apply throw key args)))))
+      (db:studio-add-asset-link! config wid (assoc-ref asset 'id)
+                                 "scene" scene-id)
+      (db:studio-set-scene-references!
+       config wid scene-id (string-list-json (list (assoc-ref asset 'id))))
+      (db:studio-update-scene!
+       config wid scene-id
+       `((storyboard . ,(storyboard-json
+                         (demo-storyboard-shots
+                          (assoc-ref (car nira) 'id)
+                          (assoc-ref (car orin) 'id)
+                          (assoc-ref (car tam) 'id))))))
+      (db:studio-touch-workplace! config wid)
+      (demo-payload config #t)))))
+
+(define acceptance-task-specs
+  '(("character_development" . "Character Development")
+    ("scene_extraction" . "Scene Extraction")
+    ("storyboard_planning" . "Storyboard Planning")))
+
+(define (acceptance-task-spec task)
+  (or (assoc task acceptance-task-specs)
+      (api-fail 404 "NOT_FOUND" "Acceptance task not found")))
+
+(define (acceptance-resolved-task config task)
+  (let* ((profile (profile-for-task config task))
+         (engine (and (not profile) (configured-engine config)))
+         (model (if profile
+                    (assoc-ref profile 'model_id)
+                    (and (configured-model config) (configured-model config))))
+         (protocol (if profile
+                       (assoc-ref profile 'protocol)
+                       engine)))
+    `(("task" . ,task)
+      ("label" . ,(cdr (acceptance-task-spec task)))
+      ("configured" . ,(and (or profile model) #t))
+      ("profile_id" . ,(mark (and profile (assoc-ref profile 'id))))
+      ("profile_name" . ,(mark (and profile (assoc-ref profile 'name))))
+      ("model" . ,(mark model))
+      ("protocol" . ,(mark protocol))
+      ("base_url" . ,(mark (and profile (assoc-ref profile 'base_url))))
+      ("external_provider" . ,(and profile
+                                    (not (equal? protocol "fake"))
+                                    #t))
+      ("may_incur_charges" . ,(and protocol
+                                   (not (equal? protocol "fake"))
+                                   #t)))))
+
+(define (studio-acceptance-overview config)
+  (ensure-legacy-model-profile! config)
+  (let* ((embedding-setting (db:studio-get-setting
+                             config "default_embedding_profile_id"))
+         (embedding (and embedding-setting
+                         (db:studio-get-embedding-profile
+                          config embedding-setting))))
+    `(("tasks" . ,(map (lambda (entry)
+                         (acceptance-resolved-task config (car entry)))
+                       acceptance-task-specs))
+      ("embedding" .
+       (("configured" . ,(and embedding #t))
+        ("profile_id" . ,(mark (and embedding (assoc-ref embedding 'id))))
+        ("profile_name" . ,(mark (and embedding (assoc-ref embedding 'name))))
+        ("model" . ,(mark (and embedding (assoc-ref embedding 'model_id))))
+        ("protocol" . ,(mark (and embedding (assoc-ref embedding 'protocol))))
+        ("dimensions" . ,(mark (and embedding
+                                    (assoc-ref embedding 'dimensions))))
+        ("may_incur_charges" . ,(and embedding #t))))
+      ("warning" . "Manual acceptance only. Each run is explicitly triggered, makes exactly one provider request and is never retried automatically.")
+      ("embedding_note" . "Embedding is tested separately from LLM tasks and does not participate in task fallback."))))
+
+(define acceptance-character-id "11111111-1111-4111-8111-111111111111")
+(define acceptance-second-character-id "22222222-2222-4222-8222-222222222222")
+
+(define (acceptance-character)
+  `((id . ,acceptance-character-id)
+    (workplace_id . ,acceptance-character-id)
+    (name . "Acceptance Mechanic")
+    (role . "Protagonist")
+    (summary . "A mechanic who refuses to depend on anyone.")
+    (concept . "A young mechanic in a rain-soaked harbor workshop who refuses to depend on anyone.")
+    (literary_identity . "{}")
+    (visual_identity . "{}")
+    (vocal_identity . "{}")
+    (performance_identity . "{}")
+    (avatar_asset_id . #f)
+    (full_body_asset_id . #f)
+    (created_at . "") (updated_at . "") (archived_at . #f)))
+
+(define (acceptance-scene)
+  `((id . ,acceptance-character-id)
+    (workplace_id . ,acceptance-character-id)
+    (title . "The Locked Workshop")
+    (summary . "A visitor brings evidence while the mechanic refuses help.")
+    (time . "Late evening")
+    (place . "A repair workshop beside the rail yard")
+    (environment . "Oil lamps, cold rain and a half-dismantled engine")
+    (background . "The workshop survives on independent commissions.")
+    (prior_events . "An important machine was deliberately damaged.")
+    (central_question . "Will the mechanic accept help before the workshop is lost?")
+    (primary_conflict . "She needs information; accepting it would make her dependent.")
+    (turn . "The visitor names a detail only a witness could know.")
+    (dialogue . "MECHANIC\nYou came a long way to tell me something I already know.")
+    (blocking . "The mechanic remains between the visitor and the engine.")
+    (spatial . "A narrow workbench divides the figures.")
+    (performance_direction . "Neither moves toward the other.")
+    (camera . "Medium two-shot.")))
+
+(define (acceptance-characters)
+  (list (acceptance-character)))
+
+(define (acceptance-reference-line)
+  "Reference image metadata: one illustrative scene plate; pixels were not inspected by the model.")
+
+(define (acceptance-elapsed-ms began)
+  (quotient (* (- (get-internal-real-time) began) 1000)
+            internal-time-units-per-second))
+
+(define (acceptance-preview text)
+  (substring (or text "") 0 (min 600 (string-length (or text "")))))
+
+(define (acceptance-response config task prepared text elapsed validation)
+  `(("task" . ,task)
+    ("profile_id" . ,(mark (assoc-ref prepared 'profile_id)))
+    ("profile_name" . ,(mark (assoc-ref prepared 'profile_name)))
+    ("model" . ,(mark (assoc-ref prepared 'model)))
+    ("protocol" . ,(mark (or (assoc-ref prepared 'protocol)
+                             (configured-engine config))))
+    ("valid" . #t)
+    ("validation" . ,validation)
+    ("elapsed_ms" . ,elapsed)
+    ("preview" . ,(acceptance-preview text))))
+
+(define (studio-run-acceptance! config task body)
+  (let* ((body (or body '()))
+         (spec (acceptance-task-spec task))
+         (_ (unless (eq? (object-ref body "confirm_charge") #t)
+              (api-fail 400 "CONFIRMATION_REQUIRED"
+                        "Set confirm_charge to true after reviewing the profile and possible charges")))
+         (began (get-internal-real-time)))
+    (case (string->symbol task)
+      ((character_development)
+       (let* ((character (acceptance-character))
+              (model/text (character-run-development-ai
+                           config character body #f))
+              (text (cadr model/text))
+              (identities (character-ai-full-identities text))
+              (prepared (prepare-task-chat
+                         config "character_development" '()
+                         '(("temperature" . 0.7) ("format" . "json")) body)))
+         (acceptance-response
+          config task prepared text (acceptance-elapsed-ms began)
+          `(("sections" . ,(map (lambda (entry)
+                                  (cons (car entry)
+                                        (length (cdr entry))))
+                                identities))
+            ("draft_persisted" . #f)))))
+      ((scene_extraction)
+       (let* ((document `((id . ,acceptance-character-id)
+                          (title . "Acceptance Scene Passage")
+                          (content . "Nira kept one hand on the lamp and refused to step aside. Orin held up the signed order. Tam placed the broken seal on the workbench and waited for one of them to admit the danger was already inside.")))
+              (characters (acceptance-characters))
+              (prepared (scene-extraction-prepared
+                         config body document 1 "document" #f #f
+                         (assoc-ref document 'content) characters))
+              (result (studio-run-ai prepared))
+              (text (or (assoc-ref result 'text) ""))
+              (draft (studio-validate-scene-extraction-json text characters)))
+         (acceptance-response
+          config task prepared text (acceptance-elapsed-ms began)
+          `(("title" . ,(assoc-ref draft 'title))
+            ("cast_count" . ,(length (assoc-ref draft 'cast)))
+            ("unresolved_count" . ,(length (assoc-ref draft 'unresolved_characters)))
+            ("persisted" . #f)))))
+      ((storyboard_planning)
+       (let* ((characters (acceptance-characters))
+              (cast
+               (list
+                `((character_id . ,acceptance-character-id)
+                  (character_name . "Acceptance Mechanic")
+                  (objective . "Keep control of the workshop.")
+                  (action . "Block the doorway.")
+                  (conflict . "She needs the visitor's evidence.")
+                  (emotional_state . "Controlled anger.")
+                  (performance_direction . "Still hands.")
+                  (subtext . "She already knows the visitor is right."))))
+              (scene (acceptance-scene))
+              (prepared (storyboard-ai-prepared
+                         config scene cast characters
+                         (list (acceptance-reference-line)) body))
+              (result (studio-run-ai prepared))
+              (text (or (assoc-ref result 'text) ""))
+              (shots (studio-validate-storyboard-json
+                      text (list acceptance-character-id))))
+         (acceptance-response
+          config task prepared text (acceptance-elapsed-ms began)
+          `(("shot_count" . ,(length shots))
+            ("character_ids_preserved" . #t)
+            ("persisted" . #f)))))
+      (else (api-fail 404 "NOT_FOUND" "Acceptance task not found")))))
 
 (define (identity-from-body body key)
   (if (not (object-has? body key))
@@ -911,22 +2240,25 @@
                 field-lines))))
 
 (define (character-run-development-ai config character body section)
-  (let* ((model (resolve-model config body))
+  (let* ((messages
+          (list
+           `(("role" . "system")
+             ("content" . ,(read-prompt
+                            (if section
+                                "character-section.md"
+                                "character-develop.md"))))
+           `(("role" . "user")
+             ("content" . ,(character-development-prompt
+                            character body section)))))
          (prepared
-          `((model . ,model)
-            (engine . ,(resolve-engine config))
-            (messages
-             . ,(list
-                 `(("role" . "system")
-                   ("content" . ,(read-prompt
-                                  (if section
-                                      "character-section.md"
-                                      "character-develop.md"))))
-                 `(("role" . "user")
-                   ("content" . ,(character-development-prompt
-                                  character body section)))))
-            (options . (("temperature" . 0.7)
-                        ("num_predict" . 4096))))))
+          (prepare-task-chat config "character_development" messages
+                             '(("temperature" . 0.7)
+                               ("num_predict" . 4096)
+                               ("max_output_tokens" . 4096)
+                               ("stream" . #f)
+                               ("format" . "json"))
+                             body))
+         (model (assoc-ref prepared 'model)))
     (catch #t
       (lambda ()
         (let* ((result (studio-run-ai prepared))
@@ -1616,7 +2948,11 @@
   (cond
    ((vector? value) (vector->list value))
    ((null? value) '())
-   ((object? value)
+   ;; A list of cast objects is also a list of pairs, so distinguish it from a
+   ;; single object by requiring object keys to be strings rather than entries.
+   ((and (list? value)
+         (every pair? value)
+         (every (lambda (entry) (string? (car entry))) value))
     (api-fail 400 "VALIDATION_ERROR" "cast must be an array"))
    ((list? value) value)
    (else (api-fail 400 "VALIDATION_ERROR" "cast must be an array"))))
@@ -1655,6 +2991,403 @@
           (loop (cdr rest) (cons id seen)))))
     entries))
 
+;; --- Writing -> Scene extraction -------------------------------------------
+
+(define (extraction-fail message)
+  (api-fail 502 "INVALID_AI_OUTPUT" message))
+
+(define (extraction-object value label)
+  (unless (object? value)
+    (extraction-fail (format #f "~a must be a JSON object" label)))
+  value)
+
+(define* (extraction-string object key label max #:key (required #f))
+  (let ((value (object-ref object key)))
+    (cond
+     ((not (object-has? object key))
+      (if required
+          (extraction-fail (format #f "~a.~a is required" label key))
+          ""))
+     ((eq? value 'null)
+      (if required
+          (extraction-fail (format #f "~a.~a must be a string" label key))
+          ""))
+     ((not (string? value))
+      (extraction-fail (format #f "~a.~a must be a string" label key)))
+     ((> (string-length value) max)
+      (extraction-fail (format #f "~a.~a is too large" label key)))
+     (else value))))
+
+(define (extraction-array value label)
+  (cond ((vector? value) (vector->list value))
+        ((list? value) value)
+        ((eq? value 'null) '())
+        (else (extraction-fail (format #f "~a must be an array" label)))))
+
+(define (extraction-known-fields object label allowed)
+  (for-each
+   (lambda (entry)
+     (unless (member (car entry) allowed string=?)
+       (extraction-fail
+        (format #f "~a contains unknown field ~a" label (car entry)))))
+   object)
+  object)
+
+(define (extraction-groups value label fields)
+  (let ((object (extraction-known-fields
+                 (if (eq? value 'null) '() (extraction-object value label))
+                 label fields)))
+    (map (lambda (field)
+           (cons field (extraction-string object field label
+                                          max-scene-text-length)))
+         fields)))
+
+(define (extraction-cast-entry value index characters)
+  (let* ((label (format #f "cast[~a]" index))
+         (entry (extraction-known-fields
+                 (extraction-object value label) label
+                 '("character_id" "character_name" "objective" "action"
+                   "conflict" "emotional_state" "performance_direction"
+                   "subtext")))
+         (raw-id (object-ref entry "character_id"))
+         (name (extraction-string entry "character_name" label
+                                  max-title-length #:required #t))
+         (character-id
+          (cond
+           ((or (not (object-has? entry "character_id")) (eq? raw-id 'null)) #f)
+           ((and (string? raw-id) (valid-uuid? raw-id))
+            (string-downcase raw-id))
+           (else (extraction-fail (format #f "~a.character_id is invalid" label)))))
+         (matched (and character-id
+                       (find (lambda (character)
+                               (equal? (assoc-ref character 'id) character-id))
+                             characters))))
+    (cond
+     ((and character-id matched)
+      (cons
+       `((character_id . ,character-id)
+         (character_name . ,(assoc-ref matched 'name))
+         (objective . ,(extraction-string entry "objective" label
+                                          max-scene-text-length))
+         (action . ,(extraction-string entry "action" label
+                                       max-scene-text-length))
+         (conflict . ,(extraction-string entry "conflict" label
+                                         max-scene-text-length))
+         (emotional_state . ,(extraction-string entry "emotional_state" label
+                                                max-scene-text-length))
+         (performance_direction
+          . ,(extraction-string entry "performance_direction" label
+                                max-scene-text-length))
+         (subtext . ,(extraction-string entry "subtext" label
+                                        max-scene-text-length))
+         (sort_order . ,index))
+       #f))
+     (else
+      (cons
+       #f
+       `((name . ,name)
+         (reason . ,(if character-id
+                        "The proposed Character ID is not in this Workplace pool."
+                        "The model could not match this person to an existing Character."))))))))
+
+(define (studio-validate-scene-extraction-json text characters)
+  (catch #t
+    (lambda ()
+      (let* ((root (extraction-known-fields
+                    (extraction-object (json-string->scm (string-trim-both text))
+                                       "scene")
+                    "scene"
+                    '("title" "summary" "given_circumstances"
+                      "dramatic_situation" "dialogue" "direction" "cast"
+                      "unresolved_characters")))
+             (raw-cast (object-ref root "cast"))
+             (cast-values (extraction-array raw-cast "cast")))
+        (when (> (length cast-values) max-extraction-characters)
+          (extraction-fail "The extracted Scene has too many cast entries"))
+        (let* ((pairs (map (lambda (entry index)
+                             (extraction-cast-entry entry index characters))
+                           cast-values (iota (length cast-values))))
+               (cast (filter identity (map car pairs)))
+               (unresolved
+                (append
+                 (filter identity (map cdr pairs))
+                 (if (object-has? root "unresolved_characters")
+                     (map (lambda (entry index)
+                            (let* ((label (format #f "unresolved_characters[~a]" index))
+                                   (object (extraction-known-fields
+                                            (extraction-object entry label) label
+                                            '("name" "reason"))))
+                              `((name . ,(extraction-string object "name" label
+                                                            max-title-length
+                                                            #:required #t))
+                                (reason . ,(extraction-string object "reason" label
+                                                              max-description-length)))))
+                          (extraction-array (object-ref root "unresolved_characters")
+                                            "unresolved_characters")
+                          (iota (length (extraction-array
+                                         (object-ref root "unresolved_characters")
+                                         "unresolved_characters"))))
+                     '()))))
+          (let loop ((rest cast) (seen '()))
+            (when (pair? rest)
+              (let ((id (assoc-ref (car rest) 'character_id)))
+                (when (member id seen string=?)
+                  (extraction-fail "The extracted Scene repeats a Character"))
+                (loop (cdr rest) (cons id seen)))))
+          `((title . ,(extraction-string root "title" "scene"
+                                         max-title-length #:required #t))
+            (summary . ,(extraction-string root "summary" "scene"
+                                           max-scene-text-length))
+            (given_circumstances
+             . ,(extraction-groups (extraction-object
+                                    (object-ref root "given_circumstances")
+                                    "given_circumstances")
+                                   "given_circumstances" scene-given-fields))
+            (dramatic_situation
+             . ,(extraction-groups (extraction-object
+                                    (object-ref root "dramatic_situation")
+                                    "dramatic_situation")
+                                   "dramatic_situation" scene-dramatic-fields))
+            (dialogue . ,(extraction-string root "dialogue" "scene"
+                                            max-scene-text-length))
+            (direction
+             . ,(extraction-groups (extraction-object
+                                    (object-ref root "direction")
+                                    "direction")
+                                   "direction" scene-direction-fields))
+            (cast . ,cast)
+            (unresolved_characters . ,unresolved)))))
+    (lambda (key . args)
+      (if (eq? key 'studio-api-error)
+          (apply throw key args)
+          (extraction-fail "The Scene Extraction model did not return valid JSON")))))
+
+(define (character-pool-prompt character index)
+  (format #f
+          "CHARACTER ID: ~a\nNAME: ~a\nROLE: ~a\nSUMMARY: ~a\nLITERARY IDENTITY: ~a\nVISUAL IDENTITY: ~a\nVOCAL IDENTITY: ~a\nPERFORMANCE IDENTITY: ~a"
+          (assoc-ref character 'id)
+          (assoc-ref character 'name)
+          (or (assoc-ref character 'role) "")
+          (clip-head (or (assoc-ref character 'summary) "") 4000)
+          (clip-head (character-ai-identity-lines character "literary_identity") 6000)
+          (clip-head (character-ai-identity-lines character "visual_identity") 6000)
+          (clip-head (character-ai-identity-lines character "vocal_identity") 4000)
+          (clip-head (character-ai-identity-lines character "performance_identity") 5000)))
+
+(define (extraction-source-range content body scope)
+  (if (equal? scope "document")
+      (values content #f #f)
+      (let* ((selected (optional-string-field body "selected_text"
+                                              #:max max-extraction-source-length))
+             (start-input (object-ref body "selection_start"))
+             (end-input (object-ref body "selection_end")))
+        (when (string-null? selected)
+          (api-fail 400 "VALIDATION_ERROR"
+                    "selected_text is required for a selection extraction"))
+        (cond
+         ((and (object-has? body "selection_start")
+               (not (or (not start-input) (integer? start-input))))
+          (api-fail 400 "VALIDATION_ERROR"
+                    "selection_start must be an integer or null"))
+         ((and (object-has? body "selection_end")
+               (not (or (not end-input) (integer? end-input))))
+          (api-fail 400 "VALIDATION_ERROR"
+                    "selection_end must be an integer or null")))
+        (if (and start-input end-input)
+            (let ((start start-input) (end end-input))
+              (unless (and (>= start 0) (<= start end)
+                           (<= end (string-length content)))
+                (api-fail 422 "INVALID_SELECTION"
+                          "The selection range is outside the current document"))
+              (unless (equal? (substring content start end) selected)
+                (api-fail 409 "STALE_SELECTION"
+                          "The selected text no longer matches the saved document"))
+              (values selected start end))
+            (let* ((first (string-contains content selected)))
+              (unless first
+                (api-fail 422 "INVALID_SELECTION"
+                          "The selected text is not present in the saved document"))
+              (let ((second (string-contains content selected (+ first 1))))
+                (if second
+                    (values selected #f #f)
+                    (values selected first (+ first (string-length selected))))))))))
+
+(define (scene-extraction-prompt document revision scope selection-start
+                                 selection-end snapshot characters)
+  (format #f
+          "KHALA_SCENE_EXTRACTION\n\nDocument: ~a\nRevision: ~a\nScope: ~a\nSelection start: ~a\nSelection end: ~a\n\nSOURCE PASSAGE\n~a\n\nCHARACTER POOL — MATCH ONLY BY EXISTING ID\n~a"
+          (assoc-ref document 'title)
+          revision scope
+          (or selection-start "not reliably available")
+          (or selection-end "not reliably available")
+          (clip-head snapshot 80000)
+          (if (null? characters)
+              "No existing Characters. Every person must be unresolved."
+              (string-join
+               (map character-pool-prompt characters
+                    (iota (length characters)))
+               "\n\n"))))
+
+(define (scene-extraction-prepared config body document revision scope
+                                   selection-start selection-end snapshot
+                                   characters)
+  (let* ((prompt (scene-extraction-prompt
+                  document revision scope selection-start selection-end
+                  snapshot characters))
+         (messages (list `(("role" . "system")
+                           ("content" . ,(read-prompt "scene-extraction.md")))
+                         `(("role" . "user") ("content" . ,prompt))))
+         (options '(("temperature" . 0.25)
+                    ("num_predict" . 4096)
+                    ("max_output_tokens" . 4096)
+                    ("stream" . #f)
+                    ("format" . "json"))))
+    (prepare-task-chat config "scene_extraction" messages options body)))
+
+(define (studio-extract-scene-draft config workplace-id document-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (document (require-document config wid document-id))
+         (did (assoc-ref document 'id))
+         (revision (required-integer-field body "expected_revision"
+                                           1 2147483647))
+         (current-revision (assoc-ref document 'revision)))
+    (unless (= revision current-revision)
+      (api-fail 409 "REVISION_CONFLICT" "Document revision changed"
+                (cons "current_revision" current-revision)))
+    (let* ((scope (if (object-has? body "scope")
+                      (string-field body "scope" #:required #t #:max 32)
+                      (let ((selected (object-ref body "selected_text")))
+                        (if (and (string? selected) (not (string-null? selected)))
+                            "selection" "document"))))
+           (_ (unless (member scope '("selection" "document"))
+                (api-fail 400 "VALIDATION_ERROR"
+                          "scope must be selection or document")))
+           (characters (filter-map
+                        (lambda (id)
+                          (db:studio-get-character config wid id))
+                        (map (lambda (entry) (assoc-ref entry 'id))
+                             (db:studio-list-characters config wid))))
+           (range-values (call-with-values
+                              (lambda ()
+                                (extraction-source-range
+                                 (assoc-ref document 'content) body scope))
+                            list))
+           (snapshot (list-ref range-values 0))
+           (selection-start (list-ref range-values 1))
+           (selection-end (list-ref range-values 2))
+           (prepared (scene-extraction-prepared
+                      config body document revision scope
+                      selection-start selection-end snapshot characters))
+           (result (studio-run-ai prepared))
+           (text (or (assoc-ref result 'text) (assoc-ref result "text") ""))
+           (draft (studio-validate-scene-extraction-json text characters))
+           (version (db:studio-latest-version-for-revision
+                     config wid did revision)))
+      (public-json-tree
+       (append
+        draft
+        `((source .
+                 (("document_id" . ,did)
+                  ("document_revision" . ,revision)
+                  ("document_version_id" . ,(mark
+                                             (and version (assoc-ref version 'id))))
+                  ("scope" . ,scope)
+                  ("selection_start" . ,(mark selection-start))
+                  ("selection_end" . ,(mark selection-end))
+                  ("text" . ,snapshot)))
+         (model . ,(assoc-ref prepared 'model))
+         (profile_id . ,(mark (assoc-ref prepared 'profile_id)))
+         (protocol . ,(or (assoc-ref prepared 'protocol)
+                           (configured-engine config)))))))))
+
+(define (studio-confirm-scene-extraction! config workplace-id document-id body)
+  (let* ((body (or body '()))
+         (workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (document (require-document config wid document-id))
+         (did (assoc-ref document 'id))
+         (revision (required-integer-field body "expected_revision"
+                                           1 2147483647))
+         (current-revision (assoc-ref document 'revision))
+         (_revision-check
+          (unless (= revision current-revision)
+            (api-fail 409 "REVISION_CONFLICT" "Document revision changed"
+                      (cons "current_revision" current-revision))))
+         (snapshot (string-field body "source_text_snapshot"
+                                 #:required #t
+                                 #:max max-extraction-source-length))
+         (start (if (object-has? body "source_selection_start")
+                    (let ((value (object-ref body "source_selection_start")))
+                      (cond ((not value) #f)
+                            ((integer? value) value)
+                            (else (api-fail 400 "VALIDATION_ERROR"
+                                            "source_selection_start must be an integer or null"))))
+                    #f))
+         (end (if (object-has? body "source_selection_end")
+                  (let ((value (object-ref body "source_selection_end")))
+                    (cond ((not value) #f)
+                          ((integer? value) value)
+                          (else (api-fail 400 "VALIDATION_ERROR"
+                                          "source_selection_end must be an integer or null"))))
+                  #f))
+         (_range-check
+          (when (and start end)
+            (unless (and (>= start 0) (<= start end)
+                         (<= end (string-length (assoc-ref document 'content))))
+              (api-fail 422 "INVALID_SELECTION"
+                        "Source selection range is outside the document"))))
+         (_source-check
+          (let ((content (assoc-ref document 'content)))
+            (cond
+             ((and start end)
+              (unless (equal? (substring content start end) snapshot)
+                (api-fail 409 "STALE_SELECTION"
+                          "The source selection no longer matches the document")))
+             ((equal? snapshot content) #t)
+             ((string-contains content snapshot) #t)
+             (else
+              (api-fail 422 "INVALID_SELECTION"
+                        "The source snapshot is not present in the document")))))
+         (values (scene-create-values body))
+         (cast (if (object-has? body "cast")
+                   (scene-cast-values (object-ref body "cast"))
+                   '()))
+         (version (db:studio-latest-version-for-revision config wid did revision))
+         (scene-id (db:studio-new-id))
+         (source-values
+          `((source_document_id . ,did)
+            (source_document_version_id . ,(and version (assoc-ref version 'id)))
+            (source_document_revision . ,revision)
+            (source_text_snapshot . ,snapshot)
+            (source_selection_start . ,start)
+            (source_selection_end . ,end))))
+    (for-each
+     (lambda (entry)
+       (unless (db:studio-get-character config wid
+                                        (assoc-ref entry 'character_id))
+         (api-fail 422 "INVALID_CAST_CHARACTER"
+                   "Every cast Character must belong to this Workplace")))
+     cast)
+    (catch 'studio-cast-error
+      (lambda ()
+        (let ((scene (db:studio-create-extracted-scene!
+                      config scene-id wid (append values source-values) cast)))
+          `(("scene" . ,(public-scene scene #:include-source-text #t))
+            ("cast" . ,(map public-scene-cast
+                            (db:studio-list-scene-cast config wid scene-id))))))
+      (lambda (key reason)
+        (api-fail 422 "INVALID_CAST_CHARACTER"
+                  "Every cast Character must belong to this Workplace")))))
+
+(define (studio-list-document-scenes config workplace-id document-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (document (require-document config wid document-id)))
+    (map public-scene
+         (db:studio-list-document-scenes config wid (assoc-ref document 'id)))))
+
 (define (studio-list-scenes config workplace-id)
   (let* ((workplace (require-workplace config workplace-id))
          (wid (assoc-ref workplace 'id)))
@@ -1673,7 +3406,7 @@
          (id (require-uuid-in-path scene-id "Scene"))
          (scene (db:studio-get-scene config wid id)))
     (if scene
-        (public-scene scene)
+        (public-scene scene #:include-source-text #t)
         (api-fail 404 "NOT_FOUND" "Scene not found"))))
 
 (define (studio-update-scene! config workplace-id scene-id body)
@@ -2635,22 +4368,27 @@
      "\n\n")))
 
 (define (storyboard-ai-prepared config scene cast characters references body)
-  (let* ((model (resolve-model config (or body '())))
-         (engine (resolve-engine config))
-         (system (read-prompt "storyboard.md"))
+  (let* ((system (read-prompt "storyboard.md"))
          (max-tokens (optional-integer-field body "max_tokens" 256
                                              max-storyboard-ai-tokens 2048))
          (context (storyboard-clip
                    (storyboard-scene-context scene cast characters references)
-                   max-storyboard-context-length)))
-    `((model . ,model)
-      (engine . ,engine)
-      (messages
-       . ,(list `(("role" . "system") ("content" . ,system))
+                   max-storyboard-context-length))
+         (messages
+          (list `(("role" . "system") ("content" . ,system))
                 `(("role" . "user") ("content" . ,context))))
-      (options . (("temperature" . 0.55)
-                  ("num_predict" . ,max-tokens)
-                  ("format" . "json"))))))
+         (options `(("temperature" . 0.55)
+                    ("num_predict" . ,max-tokens)
+                    ("max_output_tokens" . ,max-tokens)
+                    ("stream" . #f)
+                    ("format" . "json"))))
+    (prepare-task-chat config "storyboard_planning" messages options body)))
+
+(define (storyboard-deterministic? config)
+  (let ((profile (profile-for-task config "storyboard_planning")))
+    (if profile
+        (equal? (assoc-ref profile 'protocol) "fake")
+        (equal? (configured-engine config) "fake"))))
 
 (define (storyboard-shot-character-names ids cast)
   (map (lambda (character-id)
@@ -2804,7 +4542,7 @@
                (shots
                 (storyboard-fill-default-outfits
                  config wid
-                 (if (equal? (configured-engine config) "fake")
+                 (if (storyboard-deterministic? config)
                      (storyboard-generated-shots scene cast characters references
                                                  (default-model config))
                      (storyboard-run-ai-generation
@@ -3740,6 +5478,52 @@
                 "The requested studio writing model is not available"))
     model))
 
+(define (enabled-model-profile config id)
+  (and id
+       (not (string-null? id))
+       (let ((profile (db:studio-get-model-profile config id)))
+         (and profile (assoc-ref profile 'enabled) profile))))
+
+(define (profile-for-task config task)
+  (let* ((assignments (db:studio-list-task-assignments config))
+         (assignment (find (lambda (entry)
+                             (equal? (assoc-ref entry 'task) task))
+                           assignments))
+         (assigned (and assignment (assoc-ref assignment 'profile_id)))
+         (default-setting (db:studio-get-setting
+                           config "default_model_profile_id"))
+         (default-id (and default-setting
+                          (not (string-null? default-setting))
+                          default-setting))
+         (profile (or (enabled-model-profile config assigned)
+                      (enabled-model-profile config default-id))))
+    (private-profile config "llm" profile)))
+
+(define (resolve-task-model config task body)
+  (let ((profile (profile-for-task config task)))
+    (if profile
+        (let ((model (assoc-ref profile 'model_id)))
+          (unless (and model (not (string-null? model)))
+            (api-fail 503 "MODEL_UNAVAILABLE"
+                      "The assigned Model Profile has no model ID"))
+          model)
+        (resolve-model config body))))
+
+(define* (prepare-task-chat config task messages options body)
+  (let ((profile (profile-for-task config task)))
+    (if profile
+        `((profile . ,profile)
+          (profile_id . ,(assoc-ref profile 'id))
+          (profile_name . ,(assoc-ref profile 'name))
+          (protocol . ,(assoc-ref profile 'protocol))
+          (model . ,(assoc-ref profile 'model_id))
+          (messages . ,messages)
+          (options . ,options))
+        `((engine . ,(resolve-engine config))
+          (model . ,(resolve-model config (or body '())))
+          (messages . ,messages)
+          (options . ,options)))))
+
 (define (clip-tail text limit)
   (if (<= (string-length text) limit)
       text
@@ -3791,8 +5575,6 @@
               (api-fail 404 "NOT_FOUND" "Workplace not found")))
          (wid (assoc-ref workplace 'id))
          (document (require-document config wid document-id))
-         (model (resolve-model config body))
-         (engine (resolve-engine config))
          (prompt-name (if (equal? mode "continue")
                           "continue.md"
                           "inspire.md"))
@@ -3804,21 +5586,35 @@
           (list `(("role" . "system") ("content" . ,system))
                 `(("role" . "user")
                   ("content" . ,(build-ai-prompt mode document body)))))
-         (options `(("temperature" . 0.85) ("num_predict" . ,max-tokens))))
-    `((model . ,model)
-      (engine . ,engine)
-      (messages . ,messages)
-      (options . ,options))))
+         (options `(("temperature" . 0.85)
+                    ("num_predict" . ,max-tokens)
+                    ("max_output_tokens" . ,max-tokens)
+                    ("stream" . ,(equal? mode "continue")))))
+    (prepare-task-chat config "writing" messages options body)))
 
 (define* (studio-run-ai prepared #:key (on-token (lambda (token) #t))
                         (cancelled? (lambda () #f)))
-  (let* ((engine (assoc-ref prepared 'engine))
-         (chat (module-ref (resolve-interface engine) 'engine-chat)))
-    (chat (assoc-ref prepared 'model)
-          (assoc-ref prepared 'messages)
-          (assoc-ref prepared 'options)
-          #:on-token on-token
-          #:cancelled? cancelled?)))
+  (if (assoc-ref prepared 'profile)
+      (catch #t
+        (lambda ()
+          (provider:studio-chat-with-profile
+           (assoc-ref prepared 'profile)
+           (assoc-ref prepared 'messages)
+           (assoc-ref prepared 'options)
+           #:on-token on-token
+           #:cancelled? cancelled?))
+        (lambda (key . args)
+          (if (eq? key 'studio-provider-error)
+              (api-fail (if (equal? (car args) "NETWORK_ERROR") 503 502)
+                        (car args) (cadr args))
+              (apply throw key args))))
+      (let* ((engine (assoc-ref prepared 'engine))
+             (chat (module-ref (resolve-interface engine) 'engine-chat)))
+        (chat (assoc-ref prepared 'model)
+              (assoc-ref prepared 'messages)
+              (assoc-ref prepared 'options)
+              #:on-token on-token
+              #:cancelled? cancelled?))))
 
 (define* (studio-inspire config workplace-id document-id body
                          #:key (on-token (lambda (token) #t))
@@ -3831,4 +5627,7 @@
                    (assoc-ref result "text")
                    "")))
     `(("content" . ,text)
-      ("model" . ,(assoc-ref prepared 'model)))))
+      ("model" . ,(assoc-ref prepared 'model))
+      ("profile_id" . ,(mark (assoc-ref prepared 'profile_id)))
+      ("protocol" . ,(or (assoc-ref prepared 'protocol)
+                          (configured-engine config))))))

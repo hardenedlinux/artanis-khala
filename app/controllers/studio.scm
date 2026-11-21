@@ -199,8 +199,11 @@
            `(("content" . ,(or (assoc-ref result 'text) ""))
              ("model" . ,(assoc-ref prepared 'model))))))
       (lambda (key . args)
-        (log-failure "inspire" key args)
-        (reply-error 502 "GENERATION_FAILED" "Generation failed")))))
+        (if (eq? key 'studio-api-error)
+            (apply throw key args)
+            (begin
+              (log-failure "inspire" key args)
+              (reply-error 502 "GENERATION_FAILED" "Generation failed")))))))
 
 (define (continue-handler rc)
   (let* ((workplace-id (params rc "workplace_id"))
@@ -210,13 +213,18 @@
                                       "continue"))
          (run-id (studio-new-id))
          (cancelled? #f)
-         (model (assoc-ref prepared 'model)))
+         (model (assoc-ref prepared 'model))
+         (profile-id (assoc-ref prepared 'profile_id)))
     (response-emit-stream
      (lambda (send)
        (catch #t
          (lambda ()
            (send (sse-event "meta"
-                            `(("run_id" . ,run-id) ("model" . ,model))))
+                            `(("run_id" . ,run-id)
+                              ("model" . ,model)
+                              ("profile_id" . ,(if profile-id profile-id 'null))
+                              ("protocol" . ,(or (assoc-ref prepared 'protocol)
+                                                 (assoc-ref config 'engine))))))
            (studio-run-ai
             prepared
             #:on-token
@@ -267,6 +275,104 @@
 
 (get "/studio/api/v1/capabilities"
      (lambda _ (api-handler (lambda () (reply-success (studio-capabilities config))))))
+
+(get "/studio/api/v1/settings"
+     (lambda _ (api-handler (lambda () (reply-success (studio-model-settings config))))))
+
+(get "/studio/api/v1/settings/models"
+     (lambda _ (api-handler (lambda () (reply-success (studio-model-settings config))))))
+
+(post "/studio/api/v1/settings/model-profiles"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success (studio-create-model-profile! config (body-json rc)) 201)))))
+
+(put "/studio/api/v1/settings/model-profiles/:profile_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-update-model-profile! config (params rc "profile_id")
+                                         (body-json rc)))))))
+
+(page-delete "/studio/api/v1/settings/model-profiles/:profile_id"
+             (lambda (rc)
+               (api-handler
+                (lambda ()
+                  (reply-success
+                   (studio-delete-model-profile! config (params rc "profile_id")))))))
+
+(post "/studio/api/v1/settings/model-profiles/:profile_id/test"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-test-model-profile! config (params rc "profile_id")
+                                        (body-json rc)))))))
+
+(post "/studio/api/v1/settings/model-profiles/:profile_id/models"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-discover-model-profile-models
+             config (params rc "profile_id")))))))
+
+(put "/studio/api/v1/settings/routing"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success (studio-update-model-routing! config (body-json rc)))))))
+
+(post "/studio/api/v1/settings/embedding-profiles"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-create-embedding-profile! config (body-json rc)) 201)))))
+
+(put "/studio/api/v1/settings/embedding-profiles/:profile_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-update-embedding-profile! config (params rc "profile_id")
+                                             (body-json rc)))))))
+
+(page-delete "/studio/api/v1/settings/embedding-profiles/:profile_id"
+             (lambda (rc)
+               (api-handler
+                (lambda ()
+                  (reply-success
+                   (studio-delete-embedding-profile!
+                    config (params rc "profile_id")))))))
+
+(post "/studio/api/v1/settings/embedding-profiles/:profile_id/test"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-test-embedding-profile! config (params rc "profile_id")
+                                            (body-json rc)))))))
+
+(get "/studio/api/v1/settings/acceptance"
+     (lambda _ (api-handler (lambda ()
+                              (reply-success
+                               (studio-acceptance-overview config))))))
+
+(post "/studio/api/v1/settings/acceptance/:task"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-run-acceptance! config (params rc "task")
+                                    (body-json rc)))))))
+
+(post "/studio/api/v1/demo"
+      (lambda _ (api-handler (lambda ()
+                               (reply-success
+                                (studio-create-demo! config))))))
 
 (get "/studio/api/v1/workplaces"
      (lambda _ (api-handler (lambda () (reply-success (studio-list-workplaces config))))))
@@ -738,6 +844,34 @@
            (studio-update-document! config (params rc "workplace_id")
                                     (params rc "document_id")
                                     (body-json rc)))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/documents/:document_id/scene-extraction"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-extract-scene-draft config (params rc "workplace_id")
+                                        (params rc "document_id")
+                                        (body-json rc)))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/documents/:document_id/scene-extractions/confirm"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-confirm-scene-extraction! config
+                                              (params rc "workplace_id")
+                                              (params rc "document_id")
+                                              (body-json rc))
+            201)))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/documents/:document_id/scenes"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-document-scenes config (params rc "workplace_id")
+                                        (params rc "document_id")))))))
 
 (get "/studio/api/v1/workplaces/:workplace_id/documents/:document_id/versions"
      (lambda (rc)

@@ -18,6 +18,7 @@ ComfyUI history or queue persistence.
 studio_db = var/studio.sqlite3
 studio_assets_dir = var/studio-assets
 studio_asset_max_bytes = 4194304
+studio_secrets_file = var/studio-secrets.json
 studio_model =
 ```
 
@@ -26,6 +27,8 @@ studio_model =
   independent from ComfyUI input, output, history, and queue storage.
 - `studio_asset_max_bytes` limits each uploaded Asset to 4 MiB, leaving room
   for multipart framing inside the Artanis 5 MiB request limit.
+- `studio_secrets_file` stores Model Profile API keys outside SQLite. The file
+  is created atomically with mode `0600`; keys are never returned by a GET API.
 - `studio_model` optionally selects the default writing model. If it is empty,
   the first installed LLM is used; the fake engine falls back to the built-in
   `fake` model.
@@ -33,7 +36,7 @@ studio_model =
   `fake` and `sonicboom`; Studio does not introduce another inference backend.
 
 The database is initialized on first use and runs migrations through version
-`7`. The schema includes:
+`8`. The schema includes:
 
 - `studio_schema_migrations`
 - `studio_workplaces`
@@ -47,6 +50,10 @@ The database is initialized on first use and runs migrations through version
 - `studio_assets`
 - `studio_asset_tags`
 - `studio_asset_links`
+- `studio_model_settings`
+- `studio_model_profiles`
+- `studio_task_assignments`
+- `studio_embedding_profiles`
 
 `studio_characters` stores a stable UUID, `workplace_id`, `name`, `role`,
 `summary`, the original `concept`, four independent JSON identity objects,
@@ -62,6 +69,13 @@ column. Migration `5` adds this column. Migration `7` adds
 `reference_asset_ids`, an ordered JSON array of author-approved Scene reference
 image Asset IDs. Storyboards remain owned by the Scene; they are not a separate
 document or workflow subsystem.
+
+Migration `8` adds the unified model configuration tables and Scene source
+trace columns: `source_document_id`, `source_document_version_id`,
+`source_document_revision`, `source_text_snapshot`,
+`source_selection_start`, and `source_selection_end`. It also adds an index on
+the source document. Historical Scene source snapshots are records, not live
+copies of the Writing Document, and are never automatically resynchronized.
 
 `studio_assets` stores Asset metadata and a server-generated `storage_key`, but
 never stores a client-supplied filesystem path. File bytes live beneath
@@ -105,6 +119,221 @@ The model list comes from the existing installed LLM files. Under the fake
 engine, a usable `fake` model is also exposed. The `image_generation` object
 reports the current image adapter, availability, reference-image support and
 reference mode. It does not introduce a second model or engine catalogue.
+
+## Model Settings and Task Routing
+
+Studio separates three concepts: a Provider identifies the service and
+protocol, a Model Profile stores one endpoint and model configuration, and a
+Task Assignment chooses which enabled profile is used for a creative task.
+Configuration is persisted by the Artanis backend, not in browser local
+storage, and is shared by Writing, Character Development, Scene Extraction and
+Storyboard Planning.
+
+Supported text protocols are:
+
+- `openai-compatible`: OpenAI Chat Completions compatible, including OpenAI,
+  DeepSeek, SiliconFlow, BigModel, xAI, OpenRouter, Ollama, LM Studio and custom
+  compatible endpoints.
+- `gemini-native`: Google Gemini `generateContent` / `streamGenerateContent`.
+- `anthropic-messages`: Anthropic Messages API.
+- `fake`: the existing Khala fake engine, for deterministic local tests.
+
+Provider presets are returned by `GET /settings`. They are convenience
+defaults, not a model allow-list: `model_id` accepts any non-empty model ID for
+non-fake protocols. Model discovery failure never prevents manual entry.
+
+Read the complete public configuration. API keys are represented only by
+`api_key_configured` and a masked value:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/settings
+```
+
+The response contains `llm_profiles`, `embedding_profiles`,
+`default_llm_profile_id`, `default_embedding_profile_id`,
+`task_assignments`, `provider_presets`, `protocols`, `tasks`, and legacy
+engine/model fallback information.
+
+Create an OpenAI-compatible Model Profile. `api_key` is write-only:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/settings/model-profiles \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"DeepSeek Chat",
+    "provider":"deepseek",
+    "protocol":"openai-compatible",
+    "base_url":"https://api.deepseek.com/v1",
+    "api_key":"<server-only secret>",
+    "model_id":"deepseek-chat",
+    "custom_headers":{},
+    "timeout_seconds":60,
+    "parameters":{"temperature":0.7,"top_p":1.0,"max_output_tokens":2048,"stream":true},
+    "capabilities":{"temperature":true,"top_p":true,"json":true,"stream":true,"max_output_tokens":8192},
+    "enabled":true
+  }'
+```
+
+`parameters` and `capabilities` are optional JSON objects. Unknown capability
+keys do not block calls. Only parameters explicitly marked as supported are
+sent, and unknown attributes remain unknown. Known `max_output_tokens` limits
+clamp requests. Changing `provider`, `protocol`, or `model_id` resets inherited
+parameters and capabilities instead of reusing another model's specialized
+settings.
+
+Update, enable/disable, or archive a profile. Omitted fields stay unchanged.
+Omitting `api_key` or sending an empty string preserves the existing key:
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/settings/model-profiles/$PROFILE_ID \
+  -H 'Content-Type: application/json' \
+  -d '{"model_id":"deepseek-reasoner","enabled":true}'
+
+curl --noproxy '*' -X DELETE http://127.0.0.1:3000/studio/api/v1/settings/model-profiles/$PROFILE_ID
+```
+
+Test connection uses the real configured provider and a small text request.
+It is user-triggered and is not run automatically:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/settings/model-profiles/$PROFILE_ID/test \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
+Discover models when the protocol supports it. Failure returns a provider error
+while leaving manual `model_id` configuration available:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/settings/model-profiles/$PROFILE_ID/models
+```
+
+Assign a global default and per-task profiles. Supported tasks are `writing`,
+`character_development`, `scene_extraction`, and `storyboard_planning`. A task
+with no assignment falls back to the enabled global default. Set a task to
+`null` to remove its assignment:
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/settings/routing \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "default_profile_id":"'"$PROFILE_ID"'",
+    "default_embedding_profile_id":null,
+    "tasks":{
+      "writing":"'"$PROFILE_ID"'",
+      "character_development":"'"$PROFILE_ID"'",
+      "scene_extraction":"'"$PROFILE_ID"'",
+      "storyboard_planning":null
+    }
+  }'
+```
+
+Invalid or disabled profile IDs return HTTP `422` `INVALID_MODEL_PROFILE`.
+Task routing applies to the real request: the selected profile supplies the
+protocol, base URL, model ID, credentials, timeout, headers, parameters and
+capabilities. The resolved `model` and `profile_id` are included in generation
+metadata or responses for diagnosis. Disabling a profile transactionally clears
+any task assignments and global default that referenced it, so the settings UI
+never displays a disabled profile as the model that will actually run.
+
+### Embeddings
+
+Embedding configuration is independent from all LLM profiles and task routing.
+It currently supports the OpenAI-compatible Embeddings API only. The default
+Embedding profile does not affect normal Writing, Characters, or Scenes. If no
+profile exists, features that require semantic retrieval must report that
+embedding is not configured.
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/settings/embedding-profiles \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"Local Embeddings",
+    "provider":"ollama",
+    "protocol":"openai-embeddings",
+    "base_url":"http://127.0.0.1:11434/v1",
+    "api_key":"",
+    "model_id":"nomic-embed-text",
+    "dimensions":768,
+    "batch_size":16,
+    "timeout_seconds":60,
+    "custom_headers":{},
+    "enabled":true
+  }'
+```
+
+Update or archive it with the same rules as an LLM profile:
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/settings/embedding-profiles/$EMBEDDING_PROFILE_ID \
+  -H 'Content-Type: application/json' \
+  -d '{"batch_size":32}'
+
+curl --noproxy '*' -X DELETE http://127.0.0.1:3000/studio/api/v1/settings/embedding-profiles/$EMBEDDING_PROFILE_ID
+```
+
+Test sends a small text, validates a numeric vector, checks the configured
+dimension when supplied, and reports the actual model and dimensions:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/settings/embedding-profiles/$EMBEDDING_PROFILE_ID/test \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"A small embedding connection test."}'
+```
+
+API keys are stored in `studio_secrets_file`, never in the model tables or
+public responses. Authentication headers cannot be supplied through
+`custom_headers`; use `api_key`. Provider errors distinguish authentication,
+network, protocol, model-not-found, rate-limit, and server failures. Logs do not
+include API keys or Authorization headers. Explicit localhost and LAN HTTP URLs
+are allowed for Ollama, LM Studio, and self-hosted services; URLs with embedded
+credentials or non-HTTP schemes are rejected. This local secret file is not an
+OS keyring or hardware-backed vault.
+
+## Manual Model Acceptance
+
+The Settings UI exposes a deliberately small acceptance path for real provider
+verification. It is never run automatically and never traverses a model list.
+First inspect the resolved Profile, Model ID, protocol and charge warning:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/settings/acceptance
+```
+
+Then explicitly run exactly one task. `confirm_charge` is mandatory even when
+the resolved profile is the fake engine:
+
+```sh
+curl --noproxy '*' -X POST \
+  http://127.0.0.1:3000/studio/api/v1/settings/acceptance/character_development \
+  -H 'Content-Type: application/json' \
+  -d '{"confirm_charge":true}'
+```
+
+Supported task keys are `character_development`, `scene_extraction`, and
+`storyboard_planning`. Each call resolves the current task assignment, makes at
+most one provider request, validates the structured response, and returns the
+resolved model, protocol, elapsed time and a short preview. It does not create a
+Character, Scene or Storyboard. A failed or invalid response returns an error;
+the endpoint never retries. Embedding remains a separate manual Settings test.
+
+## Demo Story
+
+`POST /studio/api/v1/demo` creates or returns a dedicated
+`[SAMPLE] The Last Lamp` Workplace without touching the author's own books. It
+contains three Characters, one source Document, an authored Scene and Cast,
+four editable Storyboard shots, and one Scene-linked PNG.
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/demo
+```
+
+The call is idempotent. The image is explicitly marked as illustrative:
+`generation_metadata.generated_by_model` is `false`,
+`generation_metadata.illustrative` is `true`, and its provenance identifies it
+as a sample plate. It is not an image-model result and must not be presented as
+one. A `[SAMPLE]` Workplace exposes `sample: true` in the public Workplace
+payload.
 
 ## Workplaces
 
@@ -252,6 +481,8 @@ curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKP
 Generate drafts for all four identity sections. Non-empty Canon fields are
 locked: the model may fill gaps but the server removes any value aimed at a
 locked field. `format` is not used; the response is strictly parsed as JSON.
+This operation uses the `character_development` Task Assignment, falling back
+to the global default profile. It needs no Embedding configuration.
 
 ```sh
 curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID/ai/develop \
@@ -533,21 +764,22 @@ states/subtext, each Character's Literary, Visual and Performance Identity, and
 the text metadata of linked Scene/Character Assets. The author does not re-enter
 information already stored in those resources.
 
-With the configured `sonicboom` text engine, the Storyboard prompt in
-`conf/studio-prompts/storyboard.md` asks the existing `engine-chat` adapter to
-choose the shot count and dramatic progression from the Scene. Its reply must
-be one JSON object with exactly a `shots` array; every shot must contain exactly
-`dramatic_beat`, `action`, `character_ids`, `expression`, `performance`,
-`camera`, `visual_description`, and `image_prompt`. The server validates the
-whole schema before saving. Invalid JSON, missing/extra fields, unknown
-Character IDs, duplicate cast entries, an empty board, or more than eight shots
-return HTTP `502` `INVALID_STORYBOARD_OUTPUT`; the existing Storyboard is left
-untouched. Character IDs must come from the current Scene Cast. The server
-derives Character names and appends an authoritative Visual Canon block to
-every image prompt, so the model cannot silently replace permanent appearance.
+Storyboard Planning uses the `storyboard_planning` Task Assignment, falling back
+to the global default profile. The prompt in `conf/studio-prompts/storyboard.md`
+asks that configured provider to choose the shot count and dramatic progression
+from the Scene. Its reply must be one JSON object with exactly a `shots` array;
+every shot must contain exactly `dramatic_beat`, `action`, `character_ids`,
+`expression`, `performance`, `camera`, `visual_description`, and
+`image_prompt`. The server validates the whole schema before saving. Invalid
+JSON, missing/extra fields, unknown Character IDs, duplicate cast entries, an
+empty board, or more than eight shots return HTTP `502`
+`INVALID_STORYBOARD_OUTPUT`; the existing Storyboard is left untouched.
+Character IDs must come from the current Scene Cast. The server derives
+Character names and appends an authoritative Visual Canon block to every image
+prompt, so the model cannot silently replace permanent appearance.
 
-With `engine = fake`, creation keeps the deterministic four-shot template used
-by tests and demos. This is also the fallback used by the test suite, which
+With a fake Model Profile or the legacy `engine = fake` fallback, creation keeps
+the deterministic four-shot template used by tests and demos. The test suite
 never starts SonicBoom. Asset text metadata is supplied to the model, but no
 pixel-level visual understanding is claimed or available.
 
@@ -559,7 +791,8 @@ curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/
 
 Create the initial shots. Calling it again returns the saved Board unless
 `{"force":true}` is supplied. An optional `model` overrides the configured
-Studio writing model; optional `max_tokens` is limited to 4096:
+legacy installed model when no Model Profile is assigned; an assigned Task
+Profile remains authoritative. Optional `max_tokens` is limited to 4096:
 
 ```sh
 curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/storyboard \
@@ -839,6 +1072,111 @@ revision is not incremented. Autosave does not create a version snapshot.
 The API stores one continuous document per record. Page boundaries are a
 frontend layout concern and are never inserted into the stored Markdown.
 
+## Writing → Scene Extraction
+
+Scene Extraction turns a selected passage or the whole saved Document into a
+reviewable Scene Draft. It never changes the source Document. The request uses
+the `scene_extraction` Task Assignment, falling back to the global default LLM.
+The system prompt lives in `conf/studio-prompts/scene-extraction.md`.
+
+`expected_revision` is mandatory. A stale revision returns HTTP `409`
+`REVISION_CONFLICT` with `current_revision` before any model call. For a
+selection, `selected_text` is mandatory. `selection_start` and
+`selection_end` may be supplied when the frontend has reliable offsets; when
+present they must match the saved Document exactly or the API returns `409`
+`STALE_SELECTION`. If offsets are omitted and the selected text occurs more than
+once, the extraction proceeds without claiming a reliable range.
+
+Extract the selected passage:
+
+```sh
+curl --noproxy '*' -X POST \
+  http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/documents/$DOCUMENT_ID/scene-extraction \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "expected_revision": '"$DOCUMENT_REVISION"',
+    "scope":"selection",
+    "selected_text":"Mara stepped into the drowned district.",
+    "selection_start":1042,
+    "selection_end":1086,
+    "context_before":"The tide had begun to turn.",
+    "context_after":"The lamps were still warm."
+  }'
+```
+
+Extract the whole Document by using `"scope":"document"` and omitting the
+selection fields:
+
+```sh
+curl --noproxy '*' -X POST \
+  http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/documents/$DOCUMENT_ID/scene-extraction \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_revision":'"$DOCUMENT_REVISION"',"scope":"document"}'
+```
+
+The extraction response is a Draft, not a Scene. It includes `title`,
+`summary`, `given_circumstances`, `dramatic_situation`, `dialogue`, `direction`,
+`cast`, `unresolved_characters`, resolved `model` / `profile_id` / `protocol`,
+and a `source` object containing the Document ID, revision, optional version
+ID, scope, optional selection range, and the exact source snapshot submitted
+to the model. The model response must be one JSON object with exactly the
+documented fields. Invalid or missing JSON, unknown fields, or Character IDs
+that are malformed or duplicated return HTTP `502` `INVALID_AI_OUTPUT`; no
+Scene is created. A valid UUID that is not in the supplied pool is not trusted:
+it is retained only as an unresolved Cast suggestion for the author.
+
+The model receives the Workplace Character Pool. It must prefer an existing
+Character and return that exact UUID. A matching name alone is insufficient:
+uncertain people are returned in `unresolved_characters` instead of being
+silently matched or created. Extraction never creates or modifies a Character,
+Outfit, Visual Canon, Asset, or Document.
+
+After the author reviews and edits the fields and Cast, confirm creation. The
+server requires the same current Document revision, verifies that the supplied
+source snapshot still matches the saved source (and the exact selection range
+when offsets are supplied), revalidates every cast Character against the same
+Workplace, and creates the Scene and Cast rows transactionally. A changed
+Document returns `409`; a tampered or no-longer-present snapshot is rejected
+without creating a Scene.
+
+```sh
+curl --noproxy '*' -X POST \
+  http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/documents/$DOCUMENT_ID/scene-extractions/confirm \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title":"The Drowned District",
+    "summary":"Mara returns to a place she thought lost.",
+    "given_circumstances":{"time":"Dusk","place":"Drowned district","environment":"Fog and black water","background":"The district was abandoned years ago.","prior_events":"Mara crossed the tide line."},
+    "dramatic_situation":{"central_question":"Will Mara admit why she returned?","primary_conflict":"She needs Ilyan's help but refuses to owe him.","turn":"The lamp is still warm."},
+    "dialogue":"MARA\nYou came back.",
+    "direction":{"blocking":"Mara stays between Ilyan and the stairs.","spatial":"A narrow pier above black water.","performance_direction":"Speak quietly.","camera":"Hold on the survey map."},
+    "cast":[{"character_id":"'"$CHARACTER_ID"'","objective":"Make Ilyan admit he lied.","action":"Ask a question he cannot answer.","conflict":"Ilyan refuses to look at the map.","emotional_state":"Controlled anger.","performance_direction":"Do not raise her voice.","subtext":"She already knows."}],
+    "expected_revision":'"$DOCUMENT_REVISION"',
+    "source_text_snapshot":"Mara stepped into the drowned district.",
+    "source_selection_start":1042,
+    "source_selection_end":1086
+  }'
+```
+
+The confirmation response contains the created `scene` and `cast`. The Scene
+retains `source_document_id`, `source_document_revision`, optional
+`source_document_version_id`, `source_text_snapshot`, and optional selection
+offsets. Reading the Scene includes the source snapshot; Scene list responses
+omit snapshot text. The source fields are a trace record, not a live copy or a
+two-way synchronization mechanism. Later Document edits do not rewrite existing
+Scenes.
+
+Find Scenes extracted from a Document, newest first:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/documents/$DOCUMENT_ID/scenes
+```
+
+Repeated extraction always creates a new Draft. Confirming it creates another
+Scene; existing Scenes and author edits are never silently overwritten. The
+source Document revision, title, and content remain unchanged by both
+extraction and confirmation.
+
 ## Version History
 
 List version metadata, newest first. The list does not include historical
@@ -877,7 +1215,10 @@ audit snapshot. The selected historical row is never modified or deleted.
 
 ## Inspire
 
-Generate creative directions without changing the source document:
+Generate creative directions without changing the source document. Both
+Inspire and Continue use the `writing` Task Assignment, falling back to the
+global default. The optional `model` field applies only to the legacy
+no-profile fallback; an assigned profile remains authoritative.
 
 ```sh
 curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/documents/$DOCUMENT_ID/ai/inspire \
@@ -888,7 +1229,7 @@ curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKP
 Response:
 
 ```json
-{"data":{"content":"Markdown-formatted creative suggestions...","model":"fake"}}
+{"data":{"content":"Markdown-formatted creative suggestions...","model":"fake","profile_id":null,"protocol":"fake"}}
 ```
 
 The system prompt lives in `conf/studio-prompts/inspire.md`. The result is
@@ -909,7 +1250,7 @@ Events:
 
 ```text
 event: meta
-data: {"run_id":"uuid","model":"fake"}
+data: {"run_id":"uuid","model":"fake","profile_id":null,"protocol":"fake"}
 
 event: token
 data: {"text":"The next generated text"}
@@ -931,6 +1272,10 @@ the Artanis stream close hook sets the engine cancellation flag. Generated text
 is not saved automatically. The frontend inserts it only after the author
 accepts it, then saves with the normal document `PUT`.
 
+The `meta` event identifies the exact model and profile used. Provider
+authentication, network, protocol, model, rate-limit, and server failures are
+classified; no API key or Authorization header is logged or emitted.
+
 The continuation prompt lives in `conf/studio-prompts/continue.md`.
 
 ## Status Codes
@@ -938,14 +1283,14 @@ The continuation prompt lives in `conf/studio-prompts/continue.md`.
 | Status | Meaning |
 |---:|---|
 | `200` | Success. |
-| `201` | Workplace, Character, Outfit, Artwork Asset, Scene, Asset, link, document, or version created. |
-| `400` | Invalid JSON, UUID, enum, string, or numeric input. |
-| `404` | Workplace, Character, Scene, Asset, document, version, or managed file not found. |
-| `409` | `REVISION_CONFLICT` (with `current_revision`) or `DRAFT_PROTECTED` when AI regeneration would overwrite an author-edited identity draft. |
+| `201` | Workplace, Character, Outfit, Artwork Asset, Scene, Asset, link, document, version, Model Profile, Embedding Profile, or confirmed extracted Scene created. |
+| `400` | Invalid JSON, UUID, enum, string, URL, capability, or numeric input. |
+| `404` | Workplace, Character, Scene, Asset, document, version, Model Profile, Embedding Profile, or managed file not found. |
+| `409` | `REVISION_CONFLICT` (with `current_revision`), `STALE_SELECTION`, or `DRAFT_PROTECTED` when AI regeneration would overwrite an author-edited identity draft. |
 | `413` | Request body exceeds 4 MiB or an uploaded Asset exceeds `studio_asset_max_bytes`. |
-| `422` | Invalid resource state, such as a parent or Asset link target from another Workplace. |
-| `502` | Generation failed. |
-| `503` | Inference engine or model unavailable. |
+| `422` | Invalid resource state, such as a cross-Workplace Cast member, invalid selection, disabled Model Profile, or disallowed Asset link target. |
+| `502` | Provider or generation failed, or AI output failed strict JSON validation (`INVALID_AI_OUTPUT`, `INVALID_STORYBOARD_OUTPUT`, etc.). |
+| `503` | Network failure reaching a provider, inference engine unavailable, or no model configured. |
 
 When SonicBoom is configured but unavailable, Studio returns a clear `503`
 without attempting to load another inference subsystem. The fake engine needs
@@ -968,6 +1313,15 @@ Drafts are visually and structurally separate from Canon, and generated
 artwork never changes identity by itself. Writing continues to autosave with
 `expected_revision`, request inspiration, consume continuation SSE, and insert
 accepted text only after the author approves it.
+
+Studio Settings manages server-persisted LLM and Embedding Profiles, provider
+presets, custom endpoints and headers, masked API keys, model lookup, explicit
+connection tests, global defaults, and per-task assignments. It never shows a
+plaintext key. Writing exposes an **Extract Scene** flow that confirms the exact
+source range, reviews and edits a validated Draft, resolves Cast members from
+the Workplace Character Pool, and only then creates a Scene. The confirmed
+Scene shows its Document source trace and offers a direct Storyboard entry;
+Document views also list Scenes extracted from that Document.
 
 The Assets workspace provides grid and list views, image thumbnails, native
 audio/video previews, document placeholders, upload state, type/tag filters,
@@ -1000,6 +1354,7 @@ GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/persisten
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/storyboard.scm
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/character_studio.scm
 GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/visual_consistency.scm
+GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/model_settings.scm
 ./test/studio/run.sh
 ```
 
@@ -1011,8 +1366,25 @@ validation, author-edit/generated-image regeneration protection, explicit
 acknowledgement, Character Studio drafts and locked-Canon handling, Outfit
 default/reference transactions, fake image generation, Avatar approval, and
 Full Body/Scene reference approval, bytevector reference tracing, approved-only
-reference selection, and links across a restart. When Playwright is installed under `ui/node_modules`,
+reference selection, Model Profile CRUD, masked and preserved secrets, provider
+request construction, task routing, independent Embedding configuration,
+strict Scene Extraction validation, Character matching, source tracing, and
+links across a restart. When Playwright is installed under `ui/node_modules`,
 the same run also drives the bundled `/studio` page through concept-first
 Character creation, draft approval, Outfit creation, fake artwork generation,
-Avatar approval and a browser reload. It never enables SonicBoom or real GPU
-image generation; the fake image adapter produces a real PNG without a GPU.
+Avatar approval and a browser reload.
+
+Also run the frontend checks with the local Node toolchain:
+
+```sh
+cd studio-ui
+npm run typecheck
+npm run build
+node --check dist/studio-ui.js
+```
+
+The automated suite uses `engine = fake` and fails before touching SonicBoom or
+the GPU. It validates adapter request shapes and fake/stub generation paths,
+not the quality, availability, or billing behavior of real OpenAI, Gemini,
+Anthropic, DeepSeek, Embedding, or Moss-Image services. Real provider calls and
+GPU image generation remain manual integration checks.

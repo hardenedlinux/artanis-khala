@@ -45,7 +45,7 @@
                (equal? (assoc-ref entry "reference_kind") kind)))
         (assoc-ref usage "references")))
 
-(check 'schema-version (= 7 (db:studio-schema-version config)))
+(check 'schema-version (= 8 (db:studio-schema-version config)))
 
 (define workplace
   (db:studio-create-workplace! config (db:studio-new-id) "Visual Canon"
