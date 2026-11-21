@@ -18,7 +18,7 @@
   #:use-module (khala comfy lower)
   #:use-module (khala comfy ws)
   #:use-module (khala comfy persistence-api)
-  #:export (start-worker! image-frame image-frame-bytes preview-step?
+  #:export (start-worker! render-image! image-frame image-frame-bytes preview-step?
             workflow-fingerprints))
 
 (define running? #f)
@@ -96,6 +96,31 @@
          (folder (or (assq-ref params 'model_folder) "checkpoints"))
          (path (and name (model-file-path config folder name))))
     (if path (acons 'model_path path params) params)))
+
+;; A small synchronous bridge for Studio storyboards. It runs through the same
+;; engine adapter as the queued ComfyUI worker, but intentionally bypasses the
+;; queue and WebSocket protocol. This keeps an explicit Storyboard action quick
+;; to demo without introducing another inference subsystem.
+(define* (render-image! config prompt #:key (width 768) (height 432)
+                         (seed 0) (steps 12) (negative ""))
+  (let* ((engine-name (if (equal? (config-ref config 'engine) "sonicboom")
+                          'sonicboom 'fake))
+         (configured (or (config-ref config 'studio_model)
+                         (config-ref config 'default_model) ""))
+         (model (and (string? configured) (not (string-null? configured))
+                     configured))
+         (params `((positive . ,prompt)
+                   (negative . ,negative)
+                   (width . ,width)
+                   (height . ,height)
+                   (seed . ,seed)
+                   (steps . ,steps)
+                   (cfg . 3.0)
+                   (batch_size . 1)))
+         (params (if (and model (eq? engine-name 'sonicboom))
+                     (acons 'model model params)
+                     params)))
+    (engine-run-t2i (with-model-path config params) #:engine engine-name)))
 (define (preview-step? step) (zero? (modulo step 5)))
 
 (define (sha256-file path)

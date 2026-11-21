@@ -202,9 +202,18 @@
    "CREATE INDEX IF NOT EXISTS studio_asset_links_resource
       ON studio_asset_links(resource_type, resource_id, asset_id)"))
 
+;; Storyboards are small, scene-owned editorial documents. Keeping the shot
+;; list on the Scene preserves its authorization and lifecycle without adding
+;; another generic workflow table.
+(define migration-5
+  (list
+   "ALTER TABLE studio_scenes
+      ADD COLUMN storyboard TEXT NOT NULL DEFAULT '[]'"))
+
 (define (migrations)
   (list (cons 1 migration-1) (cons 2 migration-2)
-        (cons 3 migration-3) (cons 4 migration-4)))
+        (cons 3 migration-3) (cons 4 migration-4)
+        (cons 5 migration-5)))
 
 (define (studio-now)
   (strftime "%Y-%m-%dT%H:%M:%SZ" (gmtime (current-time))))
@@ -539,7 +548,7 @@
    time, place, environment, background, prior_events,
    central_question, primary_conflict, turn, dialogue,
    blocking, spatial, performance_direction, camera,
-   created_at, updated_at, deleted_at")
+   storyboard, created_at, updated_at, deleted_at")
 
 (define (scene-from-row row)
   `((id . ,(row-value row "id"))
@@ -561,6 +570,7 @@
     (spatial . ,(or (row-value row "spatial") ""))
     (performance_direction . ,(or (row-value row "performance_direction") ""))
     (camera . ,(or (row-value row "camera") ""))
+    (storyboard . ,(or (row-value row "storyboard") "[]"))
     (created_at . ,(row-value row "created_at"))
     (updated_at . ,(row-value row "updated_at"))
     (deleted_at . ,(row-value row "deleted_at"))
@@ -573,7 +583,7 @@
                   s.status, s.time, s.place, s.environment, s.background,
                   s.prior_events, s.central_question, s.primary_conflict,
                   s.turn, s.dialogue, s.blocking, s.spatial,
-                  s.performance_direction, s.camera, s.created_at,
+                  s.performance_direction, s.camera, s.storyboard, s.created_at,
                   s.updated_at, s.deleted_at,
                   (SELECT COUNT(*) FROM studio_scene_cast c
                    WHERE c.scene_id = s.id) AS cast_count
@@ -590,7 +600,7 @@
                      s.status, s.time, s.place, s.environment, s.background,
                      s.prior_events, s.central_question, s.primary_conflict,
                      s.turn, s.dialogue, s.blocking, s.spatial,
-                     s.performance_direction, s.camera, s.created_at,
+                     s.performance_direction, s.camera, s.storyboard, s.created_at,
                      s.updated_at, s.deleted_at,
                      (SELECT COUNT(*) FROM studio_scene_cast c
                       WHERE c.scene_id = s.id) AS cast_count
@@ -640,7 +650,8 @@
                           '(title summary sort_order status time place
                             environment background prior_events
                             central_question primary_conflict turn dialogue
-                            blocking spatial performance_direction camera)))
+                            blocking spatial performance_direction camera
+                            storyboard)))
                  (sets (car clause))
                  (values (cdr clause)))
             (if (null? sets)

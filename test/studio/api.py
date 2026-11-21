@@ -344,6 +344,89 @@ cast_read = json_request(
 )
 check("scene-cast-read", cast_read == cast)
 
+storyboard = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard",
+    {},
+)
+shots = storyboard["shots"]
+check("storyboard-created", len(shots) == 4 and storyboard["generation_available"])
+check(
+    "storyboard-uses-existing-context",
+    "Tall, weathered blue coat." in shots[0]["image_prompt"]
+    and "Make Ilyan admit he lied." in shots[0]["image_prompt"]
+    and "The northern harbor" in shots[0]["image_prompt"],
+)
+scene_with_board = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}"
+)
+check("storyboard-count-on-scene", scene_with_board["storyboard_count"] == 4)
+
+edited_shots = json.loads(json.dumps(shots))
+edited_shots[0]["content"] = "Mara steps off the gangway into the drowned district."
+edited_shots[0]["image_prompt"] += "\nAUTHOR EDIT: hold on the wet map in her hand."
+edited_board = json_request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard",
+    {"shots": edited_shots},
+)
+check(
+    "storyboard-edited-and-saved",
+    edited_board["shots"][0]["content"].startswith("Mara steps")
+    and "AUTHOR EDIT" in edited_board["shots"][0]["image_prompt"],
+)
+shot_id = edited_board["shots"][0]["id"]
+generated = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard/shots/{shot_id}/image",
+)
+check(
+    "storyboard-image-generated",
+    generated["shot"]["status"] == "generated"
+    and generated["asset"]["source"] == "generated"
+    and generated["asset"]["asset_type"] == "image"
+    and generated["shot"]["asset_id"] == generated["asset"]["id"],
+)
+status, image_bytes, image_headers = request("GET", generated["asset"]["file_url"])
+check(
+    "storyboard-image-served",
+    status == 200
+    and image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    and image_headers.get("Content-Type", "").startswith("image/png"),
+)
+scene_after_generation = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}"
+)
+check(
+    "storyboard-generation-preserves-scene",
+    scene_after_generation["dramatic_situation"]["turn"] == "The lamp is still warm."
+    and scene_after_generation["dialogue"] == "MARA\nYou came back.",
+)
+linked_assets = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/assets"
+)
+check(
+    "storyboard-image-linked-to-scene",
+    any(asset["id"] == generated["asset"]["id"] for asset in linked_assets),
+)
+regenerated = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard/shots/{shot_id}/image",
+)
+check(
+    "storyboard-image-regenerated",
+    regenerated["shot"]["asset_id"] != generated["shot"]["asset_id"],
+)
+old_asset = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/assets/{generated['asset']['id']}"
+)
+check("storyboard-regeneration-keeps-old-asset", old_asset["id"] == generated["asset"]["id"])
+status, body, _ = request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/storyboard/shots/{uuid.uuid4()}/image",
+)
+check("storyboard-unknown-shot-404", status == 404)
+
 second_scene = json_request(
     "POST",
     f"/studio/api/v1/workplaces/{workplace_id}/scenes",
@@ -942,6 +1025,8 @@ if STATE_PATH:
                 "scene_id": scene_id,
                 "document_id": document_id,
                 "asset_id": asset_id,
+                "storyboard_asset_id": regenerated["shot"]["asset_id"],
+                "storyboard_shot_id": shot_id,
                 "asset_checksum": asset["checksum"],
                 "revision": unchanged["revision"],
                 "content": unchanged["content"],

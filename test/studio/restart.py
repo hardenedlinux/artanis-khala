@@ -57,6 +57,26 @@ assert cast[0]["objective"] == "Make Ilyan admit he lied.", cast
 assert cast[0]["character_name"] == "Mara Vale", cast
 print("ok studio-scene-cast-survives-restart")
 
+with opener.open(scene_url + "/storyboard", timeout=10) as response:
+    storyboard = json.loads(response.read())["data"]
+
+assert len(storyboard["shots"]) == 4, storyboard
+shot = next(
+    item for item in storyboard["shots"] if item["id"] == expected["storyboard_shot_id"]
+)
+assert shot["status"] == "generated", shot
+assert shot["asset_id"] == expected["storyboard_asset_id"], shot
+assert shot["file_url"], shot
+print("ok studio-storyboard-survives-restart")
+
+with opener.open(
+    "http://127.0.0.1:" + port + shot["file_url"], timeout=10
+) as response:
+    storyboard_image = response.read()
+
+assert storyboard_image.startswith(b"\x89PNG\r\n\x1a\n"), storyboard_image[:16]
+print("ok studio-storyboard-image-survives-restart")
+
 asset_url = (
     f"http://127.0.0.1:{port}/studio/api/v1/workplaces/"
     f"{expected['workplace_id']}/assets/{expected['asset_id']}"

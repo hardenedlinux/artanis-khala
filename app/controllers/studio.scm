@@ -390,6 +390,41 @@
                                       (params rc "scene_id")
                                       (body-json rc)))))))
 
+(get "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id/storyboard"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-get-storyboard config (params rc "workplace_id")
+                                  (params rc "scene_id")))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id/storyboard"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-create-storyboard! config (params rc "workplace_id")
+                                       (params rc "scene_id")
+                                       (body-json rc)))))))
+
+(put "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id/storyboard"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-update-storyboard! config (params rc "workplace_id")
+                                      (params rc "scene_id")
+                                      (body-json rc)))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id/storyboard/shots/:shot_id/image"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-generate-storyboard-image! config (params rc "workplace_id")
+                                               (params rc "scene_id")
+                                               (params rc "shot_id")))))))
+
 (get "/studio/api/v1/workplaces/:workplace_id/assets"
      (lambda (rc)
        (api-handler

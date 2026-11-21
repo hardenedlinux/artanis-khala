@@ -12,6 +12,7 @@
             comfy-validate-prompt
             comfy-restore-queue!
             comfy-start-worker!
+            comfy-render-image!
             comfy-next-prompt-number!))
 
 (define prompt-counter 0)
@@ -34,6 +35,9 @@
 
 (define (comfy-start-worker! config)
   (start-worker! config))
+
+(define (comfy-render-image! config prompt width height seed)
+  (render-image! config prompt #:width width #:height height #:seed seed #:steps 12))
 
 (define (comfy-next-prompt-number!)
   (set! prompt-counter (+ prompt-counter 1))

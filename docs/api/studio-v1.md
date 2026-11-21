@@ -33,7 +33,7 @@ studio_model =
   `fake` and `sonicboom`; Studio does not introduce another inference backend.
 
 The database is initialized on first use and runs migrations through version
-`4`. The schema includes:
+`5`. The schema includes:
 
 - `studio_schema_migrations`
 - `studio_workplaces`
@@ -49,6 +49,10 @@ The database is initialized on first use and runs migrations through version
 `studio_characters` stores a stable UUID, `workplace_id`, `name`, `role`,
 `summary`, four independent JSON identity objects, timestamps, and a nullable
 `archived_at` soft-delete marker.
+
+`studio_scenes` stores the structured dramatic fields plus a `storyboard` JSON
+column. Migration `5` adds this column. Storyboards remain owned by the Scene;
+they are not a separate document or workflow subsystem.
 
 `studio_assets` stores Asset metadata and a server-generated `storage_key`, but
 never stores a client-supplied filesystem path. File bytes live beneath
@@ -326,6 +330,59 @@ Workplace. A cross-Workplace or unknown Character returns HTTP `422` with
 `INVALID_CAST_CHARACTER`. Duplicate Characters in one cast return HTTP `400`.
 The update deletes and recreates cast rows inside `BEGIN IMMEDIATE`; if any
 validation or insert fails, the previous cast remains intact.
+
+## Storyboard and Visual Output
+
+A Storyboard belongs to one Scene. Creating it collects the Scene's Given
+Circumstances, Dramatic Situation, Cast objectives/actions/emotional states,
+Character Visual Canon, and linked Scene/Character Asset names. It produces
+four editable shots; the author does not re-enter information already stored in
+the Scene, Cast, or Character resources.
+
+Read the Storyboard:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/storyboard
+```
+
+Create the initial four shots. Calling it again returns the saved Board unless
+`{"force":true}` is supplied:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/storyboard \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+Save edited shots atomically. The server ignores client-provided derived Asset
+state and preserves the existing `asset_id`, `file_url`, and status for each
+known shot ID:
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/storyboard \
+  -H 'Content-Type: application/json' \
+  -d '{"shots":[{"id":"00000000-0000-4000-8000-000000000010","number":1,"content":"Mara steps into the drowned district.","character_ids":["00000000-0000-4000-8000-000000000003"],"camera":"Wide 24mm establishing shot.","expression_action":"Mara hides her recognition.","visual_description":"Fog, wet stone, sea-blue coat.","image_prompt":"Cinematic 16:9 storyboard frame..."}]}'
+```
+
+Generate an image for one shot:
+
+```sh
+curl --noproxy '*' -X POST \
+  http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/storyboard/shots/$SHOT_ID/image
+```
+
+The response includes the updated shot and its new Asset. Generated image bytes
+are stored in `studio_assets_dir`, the Asset is created with
+`source = "generated"`, and it is linked to the current Scene. Regenerating a
+shot creates a new Asset; the previous Asset is not overwritten. The source
+Scene and Dialogue are never changed by generation.
+
+The endpoint runs synchronously through the same `engine-run-t2i` adapter used
+by the ComfyUI worker, without submitting a queue item or starting a worker.
+With `engine = fake`, a deterministic PNG is returned for demos and tests.
+If the configured image service is unavailable the API returns `503`
+`IMAGE_SERVICE_UNAVAILABLE`; a failed generation returns `502`
+`GENERATION_FAILED` and leaves the Storyboard and Scene intact. There is no
+fabricated success image.
 
 ## Assets
 
@@ -647,6 +704,13 @@ panel, while Writing exposes the same panel for the active Document. These
 panels use the shared Asset-library picker and do not duplicate Character or
 Scene data.
 
+Each Scene has a prominent **Create Storyboard** / **Open Storyboard** action.
+The Storyboard view shows large 16:9 shot cards, editable camera, action,
+visual description and image Prompt, Cast selection, image generation and
+regeneration, and a return path to the Scene. Generated images are loaded from
+the managed Asset file URL, so refreshing the page or restarting the backend
+restores both the Storyboard and its visuals.
+
 ## Tests
 
 Run the persistence and HTTP integration suite with the fake engine:
@@ -657,6 +721,7 @@ GUILE_AUTO_COMPILE=0 GUILE_LOAD_PATH="$PWD/lib:$PWD" guile test/studio/persisten
 ```
 
 The runner creates temporary SQLite and Asset directories, starts and stops
-Artanis twice, and checks document, Character, Scene, Cast, Asset metadata,
-tags, managed file bytes, missing-file errors, upload limits, temporary-file
-cleanup, and Asset links across a restart. It never enables SonicBoom.
+Artanis twice, and checks document, Character, Scene, Cast, Storyboard,
+generated-image Assets, Asset metadata, tags, managed file bytes, missing-file
+errors, upload limits, temporary-file cleanup, and links across a restart. It
+never enables SonicBoom.

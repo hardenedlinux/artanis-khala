@@ -29,7 +29,7 @@
            (else entry)))
        (load-config)))
 
-(check 'fresh-schema (= 4 (studio-schema-version config)))
+(check 'fresh-schema (= 5 (studio-schema-version config)))
 
 (define workplace
   (studio-create-workplace! config (studio-new-id) "Persistence World"
