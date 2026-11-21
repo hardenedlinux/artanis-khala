@@ -32,9 +32,174 @@ interface Capabilities {
   api_version: number; storage: string; engine: string; default_model: string | null;
   models: { id: string; name: string; size: number }[]; ai_available: boolean;
 }
+type IdentityKey = "literary_identity" | "visual_identity" | "vocal_identity" | "performance_identity";
+interface StudioCharacter {
+  id: string; workplace_id: string; name: string; role: string; summary: string;
+  literary_identity: Record<string, string>;
+  visual_identity: Record<string, string>;
+  vocal_identity: Record<string, string>;
+  performance_identity: Record<string, string>;
+  created_at: string; updated_at: string; archived_at: string | null;
+}
+interface CharacterDraft {
+  name: string; role: string; summary: string;
+  identities: Record<IdentityKey, Record<string, string>>;
+}
+interface SceneGivenCircumstances {
+  time: string; place: string; environment: string; background: string; prior_events: string;
+}
+interface SceneDramaticSituation {
+  central_question: string; primary_conflict: string; turn: string;
+}
+interface SceneDirection {
+  blocking: string; spatial: string; performance_direction: string; camera: string;
+}
+interface StudioScene {
+  id: string; workplace_id: string; title: string; summary: string; sort_order: number;
+  status: "draft" | "ready" | "final";
+  given_circumstances: SceneGivenCircumstances;
+  dramatic_situation: SceneDramaticSituation;
+  dialogue: string; direction: SceneDirection; cast_count: number;
+  created_at: string; updated_at: string; deleted_at: string | null;
+}
+interface SceneCastEntry {
+  id: string; scene_id: string; character_id: string; character_name: string;
+  character_role: string; objective: string; action: string; conflict: string;
+  emotional_state: string; performance_direction: string; subtext: string;
+  sort_order: number; created_at: string; updated_at: string;
+}
+interface SceneCastDraft {
+  character_id: string; character_name: string; character_role: string;
+  objective: string; action: string; conflict: string; emotional_state: string;
+  performance_direction: string; subtext: string;
+}
+interface SceneDraft {
+  title: string; summary: string; sort_order: number; status: StudioScene["status"];
+  given_circumstances: SceneGivenCircumstances;
+  dramatic_situation: SceneDramaticSituation;
+  dialogue: string; direction: SceneDirection;
+}
 interface PageSpread { left: string; right: string }
 type Section = "writing" | "characters" | "scenes" | "assets" | "settings";
 type SaveState = "已保存" | "正在保存…" | "版本冲突" | "保存失败" | "AI 生成中";
+
+const CHARACTER_SECTIONS: { key: IdentityKey; title: string; en: string; icon: string; description: string; fields: { key: string; label: string; hint: string; wide?: boolean }[] }[] = [
+  {
+    key: "literary_identity", title: "文学身份", en: "LITERARY IDENTITY", icon: "book",
+    description: "人物的经历、内在驱动力与变化轨迹。先写下已经确定的部分，未回答的问题可以留白。",
+    fields: [
+      { key: "background", label: "背景经历", hint: "成长环境、关键事件、来到故事开始前的人生。", wide: true },
+      { key: "personality", label: "性格", hint: "稳定倾向、矛盾之处、面对压力时的样子。", wide: true },
+      { key: "values", label: "价值观", hint: "认为什么重要，愿意为什么妥协或拒绝。" },
+      { key: "motivations", label: "动机", hint: "当下推动行动的欲望与理由。" },
+      { key: "fears", label: "恐惧", hint: "最想避免的失去、羞辱或真相。" },
+      { key: "goals", label: "目标", hint: "明确想得到或完成的事情。" },
+      { key: "arc", label: "人物弧线", hint: "从何处出发，可能走向怎样的变化。", wide: true },
+    ],
+  },
+  {
+    key: "visual_identity", title: "视觉身份", en: "VISUAL CANON", icon: "images",
+    description: "作者批准的标准形象。这里只记录 Canon；AI 生成结果提出的新特征必须由你确认后再写入。",
+    fields: [
+      { key: "standard_appearance", label: "标准外貌", hint: "第一眼可辨认的整体形象。", wide: true },
+      { key: "face", label: "脸部", hint: "骨相、眼睛、鼻子、嘴、肤色、年龄感。" },
+      { key: "body", label: "体型", hint: "身高、体态、力量感、行动方式。" },
+      { key: "hair", label: "发型", hint: "长度、质地、颜色、日常整理方式。" },
+      { key: "clothing", label: "服装", hint: "标志性着装、材质、磨损与配件。", wide: true },
+      { key: "palette", label: "色彩", hint: "属于这个角色的稳定色彩关系。" },
+      { key: "expressions", label: "表情", hint: "常见表情与情绪显露方式。" },
+      { key: "posture", label: "姿态", hint: "站姿、坐姿、习惯性的身体重心。", wide: true },
+    ],
+  },
+  {
+    key: "vocal_identity", title: "声音身份", en: "VOCAL IDENTITY", icon: "lightbulb",
+    description: "稳定的声音 Canon，供对白、朗读和未来的声音制作共同参考。",
+    fields: [
+      { key: "timbre", label: "音色", hint: "明亮、沙哑、温暖、干涩等稳定质感。" },
+      { key: "range", label: "音域", hint: "自然音域与情绪升高或压低时的变化。" },
+      { key: "pitch", label: "音高", hint: "日常说话的基准高度。" },
+      { key: "accent", label: "口音", hint: "地域、阶层或混合口音。" },
+      { key: "pronunciation", label: "发音习惯", hint: "特定音节、吞音、咬字与语汇习惯。", wide: true },
+      { key: "pace", label: "语速", hint: "节奏、停顿与情绪变化时的加速或放慢。" },
+    ],
+  },
+  {
+    key: "performance_identity", title: "表演身份", en: "PERFORMANCE IDENTITY", icon: "scene",
+    description: "角色如何行动、反应和在情境中表现自己。它连接文学内在与视觉、声音外在。",
+    fields: [
+      { key: "habits", label: "行为习惯", hint: "反复出现的小动作、仪式与偏好。", wide: true },
+      { key: "movement", label: "动作方式", hint: "走路、转身、进入空间时的节奏。" },
+      { key: "gestures", label: "手势", hint: "说话和思考时的手部语言。" },
+      { key: "emotional_responses", label: "情绪反应", hint: "愤怒、害怕、亲近或受伤时的表现。", wide: true },
+      { key: "situations", label: "不同情境下的表现", hint: "面对权力、亲密、危险、失败或成功时的差异。", wide: true },
+    ],
+  },
+];
+
+function emptyIdentities(): Record<IdentityKey, Record<string, string>> {
+  return { literary_identity: {}, visual_identity: {}, vocal_identity: {}, performance_identity: {} };
+}
+
+function characterDraft(character: StudioCharacter): CharacterDraft {
+  return {
+    name: character.name || "",
+    role: character.role || "",
+    summary: character.summary || "",
+    identities: {
+      literary_identity: { ...(character.literary_identity || {}) },
+      visual_identity: { ...(character.visual_identity || {}) },
+      vocal_identity: { ...(character.vocal_identity || {}) },
+      performance_identity: { ...(character.performance_identity || {}) },
+    },
+  };
+}
+
+function characterAppearance(character: StudioCharacter): string {
+  const visual = character.visual_identity || {};
+  return visual.standard_appearance || visual.clothing || visual.face || character.summary || "视觉 Canon 尚未填写";
+}
+
+function sceneDraft(scene: StudioScene): SceneDraft {
+  return {
+    title: scene.title || "",
+    summary: scene.summary || "",
+    sort_order: scene.sort_order || 0,
+    status: scene.status || "draft",
+    given_circumstances: {
+      time: scene.given_circumstances?.time || "",
+      place: scene.given_circumstances?.place || "",
+      environment: scene.given_circumstances?.environment || "",
+      background: scene.given_circumstances?.background || "",
+      prior_events: scene.given_circumstances?.prior_events || "",
+    },
+    dramatic_situation: {
+      central_question: scene.dramatic_situation?.central_question || "",
+      primary_conflict: scene.dramatic_situation?.primary_conflict || "",
+      turn: scene.dramatic_situation?.turn || "",
+    },
+    dialogue: scene.dialogue || "",
+    direction: {
+      blocking: scene.direction?.blocking || "",
+      spatial: scene.direction?.spatial || "",
+      performance_direction: scene.direction?.performance_direction || "",
+      camera: scene.direction?.camera || "",
+    },
+  };
+}
+
+function castDraft(entry: SceneCastEntry): SceneCastDraft {
+  return {
+    character_id: entry.character_id,
+    character_name: entry.character_name || "Unknown Character",
+    character_role: entry.character_role || "",
+    objective: entry.objective || "",
+    action: entry.action || "",
+    conflict: entry.conflict || "",
+    emotional_state: entry.emotional_state || "",
+    performance_direction: entry.performance_direction || "",
+    subtext: entry.subtext || "",
+  };
+}
 
 class StudioApiError extends Error {
   status: number;
@@ -176,6 +341,571 @@ function Modal({ title, eyebrow, children, actions, onClose, className = "" }: {
       <div className="modal-body">{children}</div>
       {actions && <div className="modal-actions">{actions}</div>}
     </section>
+  </div>;
+}
+
+function CharactersWorkspace({ workplace, notify }: { workplace: Workplace; notify: (message: string) => void }) {
+  const [characters, setCharacters] = React.useState<StudioCharacter[]>([]);
+  const [active, setActive] = React.useState<StudioCharacter | null>(null);
+  const [draft, setDraft] = React.useState<CharacterDraft | null>(null);
+  const [sectionKey, setSectionKey] = React.useState<IdentityKey>("literary_identity");
+  const [dirtySections, setDirtySections] = React.useState<Record<IdentityKey, boolean>>({
+    literary_identity: false, visual_identity: false,
+    vocal_identity: false, performance_identity: false,
+  });
+  const [metaDirty, setMetaDirty] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [modal, setModal] = React.useState<"create" | "archive" | null>(null);
+  const [newName, setNewName] = React.useState("");
+  const [newRole, setNewRole] = React.useState("");
+  const [newSummary, setNewSummary] = React.useState("");
+
+  function resetDirty() {
+    setMetaDirty(false);
+    setDirtySections({
+      literary_identity: false, visual_identity: false,
+      vocal_identity: false, performance_identity: false,
+    });
+  }
+
+  function installCharacter(character: StudioCharacter) {
+    setActive(character);
+    setDraft(characterDraft(character));
+    setSectionKey("literary_identity");
+    resetDirty();
+    setError("");
+  }
+
+  function updateCharacterList(character: StudioCharacter) {
+    setCharacters(previous => {
+      const exists = previous.some(item => item.id === character.id);
+      return exists
+        ? previous.map(item => item.id === character.id ? character : item)
+        : [character, ...previous];
+    });
+  }
+
+  React.useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError("");
+    api<StudioCharacter[]>(`/workplaces/${workplace.id}/characters`)
+      .then(async list => {
+        if (!alive) return;
+        setCharacters(list);
+        if (!list.length) {
+          setActive(null); setDraft(null); resetDirty(); return;
+        }
+        const detail = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${list[0].id}`);
+        if (alive) installCharacter(detail);
+      })
+      .catch((cause: any) => {
+        if (alive) setError(cause?.message || "无法读取角色列表");
+      })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [workplace.id]);
+
+  const hasChanges = metaDirty || Object.values(dirtySections).some(Boolean);
+
+  async function selectCharacter(id: string) {
+    if (active?.id === id) return;
+    if (hasChanges && !window.confirm("当前角色还有未保存的修改。切换角色会放弃这些修改，继续吗？")) return;
+    setLoading(true); setError("");
+    try {
+      const detail = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${id}`);
+      installCharacter(detail);
+    } catch (cause: any) {
+      setError(cause?.message || "无法打开角色");
+    } finally { setLoading(false); }
+  }
+
+  async function createCharacter() {
+    const name = newName.trim();
+    if (!name || saving) return;
+    setSaving(true); setError("");
+    try {
+      const created = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters`, {
+        method: "POST",
+        body: { name, role: newRole.trim(), summary: newSummary.trim() },
+      });
+      updateCharacterList(created);
+      installCharacter(created);
+      setModal(null); setNewName(""); setNewRole(""); setNewSummary("");
+      notify("角色档案已建立");
+    } catch (cause: any) {
+      setError(cause?.message || "创建角色失败");
+    } finally { setSaving(false); }
+  }
+
+  async function saveMetadata() {
+    if (!active || !draft || saving) return;
+    const name = draft.name.trim();
+    if (!name) { setError("角色名不能为空"); return; }
+    setSaving(true); setError("");
+    try {
+      const saved = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${active.id}`, {
+        method: "PUT",
+        body: { name, role: draft.role.trim(), summary: draft.summary.trim() },
+      });
+      setActive(saved);
+      updateCharacterList(saved);
+      setDraft(previous => previous ? { ...previous, name: saved.name, role: saved.role, summary: saved.summary } : previous);
+      setMetaDirty(false);
+      notify("角色档案信息已保存");
+    } catch (cause: any) {
+      setError(cause?.message || "保存角色档案失败");
+    } finally { setSaving(false); }
+  }
+
+  async function saveIdentity(key: IdentityKey) {
+    if (!active || !draft || saving) return;
+    setSaving(true); setError("");
+    try {
+      const saved = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${active.id}`, {
+        method: "PUT",
+        body: { [key]: draft.identities[key] },
+      });
+      setActive(saved);
+      updateCharacterList(saved);
+      setDraft(previous => previous ? {
+        ...previous,
+        identities: { ...previous.identities, [key]: { ...(saved[key] || {}) } },
+      } : previous);
+      setDirtySections(previous => ({ ...previous, [key]: false }));
+      notify(`${CHARACTER_SECTIONS.find(section => section.key === key)?.title || "身份"}已保存`);
+    } catch (cause: any) {
+      setError(cause?.message || "保存身份资料失败");
+    } finally { setSaving(false); }
+  }
+
+  async function archiveCharacter() {
+    if (!active || saving) return;
+    setSaving(true); setError("");
+    try {
+      await api<{ archived_at: string }>(`/workplaces/${workplace.id}/characters/${active.id}`, { method: "DELETE" });
+      setModal(null);
+      const list = await api<StudioCharacter[]>(`/workplaces/${workplace.id}/characters`);
+      setCharacters(list);
+      if (list.length) {
+        const next = await api<StudioCharacter>(`/workplaces/${workplace.id}/characters/${list[0].id}`);
+        installCharacter(next);
+      } else {
+        setActive(null); setDraft(null); resetDirty();
+      }
+      notify("角色已归档，历史引用不会被破坏");
+    } catch (cause: any) {
+      setError(cause?.message || "归档角色失败");
+    } finally { setSaving(false); }
+  }
+
+  function editMeta(field: "name" | "role" | "summary", value: string) {
+    setDraft(previous => previous ? { ...previous, [field]: value } : previous);
+    setMetaDirty(true);
+    setError("");
+  }
+
+  function editIdentity(key: IdentityKey, field: string, value: string) {
+    setDraft(previous => previous ? {
+      ...previous,
+      identities: {
+        ...previous.identities,
+        [key]: { ...previous.identities[key], [field]: value },
+      },
+    } : previous);
+    setDirtySections(previous => ({ ...previous, [key]: true }));
+    setError("");
+  }
+
+  const currentSection = CHARACTER_SECTIONS.find(section => section.key === sectionKey) || CHARACTER_SECTIONS[0];
+  const saveLabel = saving ? "正在保存…" : hasChanges ? "有未保存修改" : "已保存";
+
+  function renderCharacterList() {
+    if (loading && !characters.length) {
+      return <div className="character-state"><span className="thinking-mark">✦</span><p>正在翻阅角色档案……</p></div>;
+    }
+    if (!characters.length) {
+      return <div className="character-state character-empty-state"><div className="empty-book">✦</div><h2>还没有角色。</h2><p>先建立一个稳定身份，之后可以逐步完善四类资料。</p><button className="tool-button primary" onClick={() => setModal("create")}><Icon name="plus"/>建立第一个角色</button></div>;
+    }
+    return <div className="character-list">{characters.map(character => <button key={character.id} className={`character-row ${active?.id === character.id ? "active" : ""}`} onClick={() => void selectCharacter(character.id)}>
+      <span className="character-monogram">{character.name.trim().slice(0, 1) || "?"}</span>
+      <span className="character-row-copy"><strong>{character.name}</strong><small>{character.role || "未设定角色定位"}</small><span>{characterAppearance(character)}</span></span>
+    </button>)}</div>;
+  }
+
+  function renderCharacterDetail() {
+    if (!active || !draft) {
+      return <div className="character-empty-detail"><div className="placeholder-ornament">K</div><div className="eyebrow brass-text">CHARACTER DOSSIER</div><h2>让角色先拥有一个名字。</h2><p>角色是 Workplace 的一等资源。身份资料可以逐步补充，不需要一次完成。</p><button className="tool-button primary" onClick={() => setModal("create")}><Icon name="plus"/>建立角色档案</button></div>;
+    }
+    return <>
+      <div className="character-detail-head">
+        <div><div className="eyebrow">CHARACTER DOSSIER · {active.role || "UNASSIGNED"}</div><h2>{active.name}</h2><p>{active.summary || "这个角色的档案正在形成。"}</p></div>
+        <div className="character-detail-actions"><span className={`character-save-state ${hasChanges ? "dirty" : ""}`}>{saveLabel}</span><button className="head-btn archive-character" disabled={saving} onClick={() => setModal("archive")}>归档角色</button></div>
+      </div>
+      <div className="character-meta-panel">
+        <label className="identity-field"><span>角色名</span><small>稳定、可识别的正式称呼。</small><input value={draft.name} maxLength={512} onChange={(event: any) => editMeta("name", event.target.value)}/></label>
+        <label className="identity-field"><span>角色定位</span><small>例如主角、对手、配角或叙述者。</small><input value={draft.role} maxLength={256} onChange={(event: any) => editMeta("role", event.target.value)}/></label>
+        <label className="identity-field wide"><span>一句话档案</span><small>迅速回到这个角色是谁。</small><textarea rows={3} value={draft.summary} onChange={(event: any) => editMeta("summary", event.target.value)}/></label>
+        <div className="identity-panel-actions wide"><span>{metaDirty ? "档案信息有未保存修改" : "档案信息已保存"}</span><button className="tool-button" disabled={saving || !metaDirty} onClick={() => void saveMetadata()}>保存档案信息</button></div>
+      </div>
+      <div className="identity-tabs">{CHARACTER_SECTIONS.map(section => <button key={section.key} className={sectionKey === section.key ? "active" : ""} onClick={() => setSectionKey(section.key)}><Icon name={section.icon}/><span>{section.title}</span><small>{section.en}</small>{dirtySections[section.key] && <i/>}</button>)}</div>
+      <section className="identity-panel">
+        <div className="identity-panel-head"><div><div className="eyebrow">{currentSection.en}</div><h3>{currentSection.title}</h3><p>{currentSection.description}</p></div><span className={dirtySections[currentSection.key] ? "identity-dirty" : ""}>{dirtySections[currentSection.key] ? "本节未保存" : "本节已保存"}</span></div>
+        {currentSection.key === "visual_identity" && <div className="canon-note"><strong>视觉 Canon 由作者控制</strong><span>AI 生成中出现的机械手臂、新服装、伤痕等新特征不会自动修改这里；只有你明确保存后才会成为 Canon。</span></div>}
+        <div className="identity-grid">{currentSection.fields.map(field => <label key={field.key} className={`identity-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 4 : 3} value={draft.identities[currentSection.key][field.key] || ""} onChange={(event: any) => editIdentity(currentSection.key, field.key, event.target.value)}/></label>)}</div>
+        <div className="identity-panel-actions"><span>{dirtySections[currentSection.key] ? "只保存这一部分，不会覆盖其他身份资料。" : "可以随时回来继续补充。"}</span><button className="tool-button primary" disabled={saving || !dirtySections[currentSection.key]} onClick={() => void saveIdentity(currentSection.key)}>保存{currentSection.title}</button></div>
+      </section>
+    </>;
+  }
+
+  return <div className="book-stage character-stage">
+    <div className="book-topline"><div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace.title}</span><span className="top-separator">/</span><span className="document-crumb">CHARACTERS</span></div><div className="book-actions"><span className="character-count">{characters.length} 个角色</span><button className="head-btn" onClick={() => setModal("create")}><Icon name="plus"/>新建角色</button></div></div>
+    <div className="character-workspace">
+      <aside className="character-index"><div className="character-index-head"><div className="eyebrow brass-text">THE LIVING ATELIER</div><h1>角色档案</h1><p>稳定身份是场景、写作与制作共同引用的基础。</p></div>{error && <div className="character-error">{error}<button onClick={() => setModal(null)}>关闭</button></div>}{renderCharacterList()}</aside>
+      <main className="character-detail">{renderCharacterDetail()}</main>
+    </div>
+    {modal === "create" && <Modal title="建立角色档案" eyebrow="A NEW CHARACTER ENTERS" onClose={() => { setModal(null); setError(""); }} actions={<><button className="quiet-button" onClick={() => setModal(null)}>取消</button><button className="confirm-button" disabled={!newName.trim() || saving} onClick={() => void createCharacter()}>{saving ? "创建中…" : "建立并开始"}</button></>}>
+      <p className="modal-intro">先确定名字、定位和一句话档案。四类身份资料可以在角色工作区中逐步完善。</p>
+      {error && <p className="form-error">{error}</p>}
+      <label className="field-label">角色名<input autoFocus value={newName} maxLength={512} onChange={(event: any) => setNewName(event.target.value)} placeholder="角色的正式称呼"/></label>
+      <label className="field-label">角色定位<input value={newRole} maxLength={256} onChange={(event: any) => setNewRole(event.target.value)} placeholder="主角、对手、配角……"/></label>
+      <label className="field-label">一句话档案<textarea rows={3} value={newSummary} onChange={(event: any) => setNewSummary(event.target.value)} placeholder="用一句话说明这个角色是谁。"/></label>
+    </Modal>}
+    {modal === "archive" && active && <Modal title="归档这个角色？" eyebrow="SOFT ARCHIVE" onClose={() => setModal(null)} actions={<><button className="quiet-button" onClick={() => setModal(null)}>保留角色</button><button className="confirm-button danger-button" disabled={saving} onClick={() => void archiveCharacter()}>{saving ? "归档中…" : "确认归档"}</button></>}>
+      <p className="modal-intro">“{active.name}”会从角色列表中隐藏，但数据库记录和稳定 Character ID 会保留，避免破坏未来场景、资产与制作的引用。</p>
+      {error && <p className="form-error">{error}</p>}
+    </Modal>}
+  </div>;
+}
+
+const SCENE_GIVEN_FIELDS: { key: keyof SceneGivenCircumstances; label: string; hint: string; wide?: boolean }[] = [
+  { key: "time", label: "时间", hint: "一天中的时刻、时代、时序关系。" },
+  { key: "place", label: "地点", hint: "人物实际聚集的具体空间。" },
+  { key: "environment", label: "环境", hint: "天气、光线、声音、气味与空间压力。", wide: true },
+  { key: "background", label: "背景", hint: "理解此情境所需的世界与人物背景。", wide: true },
+  { key: "prior_events", label: "此前发生的事", hint: "直接推动本场戏的既有行动与后果。", wide: true },
+];
+
+const SCENE_DRAMATIC_FIELDS: { key: keyof SceneDramaticSituation; label: string; hint: string; wide?: boolean }[] = [
+  { key: "central_question", label: "核心问题", hint: "观众与人物共同等待回答的问题。", wide: true },
+  { key: "primary_conflict", label: "主要冲突", hint: "谁想要什么，谁或什么阻止了他。", wide: true },
+  { key: "turn", label: "情境变化", hint: "这场戏结束时，什么已经不可逆地改变。", wide: true },
+];
+
+const SCENE_DIRECTION_FIELDS: { key: keyof SceneDirection; label: string; hint: string; wide?: boolean }[] = [
+  { key: "blocking", label: "动作调度", hint: "人物的进入、离开、距离与身体行动。", wide: true },
+  { key: "spatial", label: "空间位置", hint: "谁站在哪里，空间如何限制或推动冲突。" },
+  { key: "performance_direction", label: "表演指导", hint: "节奏、停顿、情绪压力与表演选择。" },
+  { key: "camera", label: "镜头指导", hint: "将来用于影像时的视线、景别与运动建议。", wide: true },
+];
+
+const SCENE_CAST_FIELDS: { key: keyof Pick<SceneCastDraft, "objective" | "action" | "conflict" | "emotional_state" | "performance_direction" | "subtext">; label: string; hint: string; wide?: boolean }[] = [
+  { key: "objective", label: "当前目标", hint: "这个角色在这一场里想得到什么。", wide: true },
+  { key: "action", label: "行动策略", hint: "为了目标正在做什么，如何试探或施压。" },
+  { key: "conflict", label: "互动与冲突", hint: "主要阻力，以及与谁发生怎样的碰撞。", wide: true },
+  { key: "emotional_state", label: "情绪状态", hint: "表层情绪与情绪之下的压力。" },
+  { key: "subtext", label: "潜台词", hint: "没有说出口、但正在发生的意思。" },
+  { key: "performance_direction", label: "表演指导", hint: "本场特有的身体、语气与节奏选择。", wide: true },
+];
+
+const SCENE_STATUS_LABELS: Record<StudioScene["status"], string> = {
+  draft: "草稿", ready: "可排演", final: "定稿",
+};
+
+function ScenesWorkspace({ workplace, notify }: { workplace: Workplace; notify: (message: string) => void }) {
+  const [scenes, setScenes] = React.useState<StudioScene[]>([]);
+  const [characters, setCharacters] = React.useState<StudioCharacter[]>([]);
+  const [active, setActive] = React.useState<StudioScene | null>(null);
+  const [draft, setDraft] = React.useState<SceneDraft | null>(null);
+  const [cast, setCast] = React.useState<SceneCastDraft[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [detailLoading, setDetailLoading] = React.useState(false);
+  const [savingScene, setSavingScene] = React.useState(false);
+  const [savingCast, setSavingCast] = React.useState(false);
+  const [sceneDirty, setSceneDirty] = React.useState(false);
+  const [castDirty, setCastDirty] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [modal, setModal] = React.useState<"create" | "delete" | null>(null);
+  const [newTitle, setNewTitle] = React.useState("");
+  const [newSummary, setNewSummary] = React.useState("");
+
+  function installScene(scene: StudioScene, entries: SceneCastEntry[]) {
+    setActive(scene);
+    setDraft(sceneDraft(scene));
+    setCast(entries.map(castDraft));
+    setSceneDirty(false);
+    setCastDirty(false);
+    setError("");
+  }
+
+  async function openScene(sceneId: string, confirmLeave = true) {
+    if (active?.id === sceneId) return;
+    if (confirmLeave && (sceneDirty || castDirty) && !window.confirm("这个场景还有未保存的修改。切换会放弃它们，继续吗？")) return;
+    setDetailLoading(true); setError("");
+    try {
+      const [scene, entries] = await Promise.all([
+        api<StudioScene>(`/workplaces/${workplace.id}/scenes/${sceneId}`),
+        api<SceneCastEntry[]>(`/workplaces/${workplace.id}/scenes/${sceneId}/cast`),
+      ]);
+      installScene(scene, entries);
+    } catch (cause: any) {
+      setError(cause?.message || "无法打开场景");
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  React.useEffect(() => {
+    let alive = true;
+    setLoading(true); setError("");
+    Promise.all([
+      api<StudioScene[]>(`/workplaces/${workplace.id}/scenes`),
+      api<StudioCharacter[]>(`/workplaces/${workplace.id}/characters`),
+    ]).then(async ([sceneList, characterList]) => {
+      if (!alive) return;
+      setScenes(sceneList);
+      setCharacters(characterList);
+      if (!sceneList.length) {
+        setActive(null); setDraft(null); setCast([]);
+        setSceneDirty(false); setCastDirty(false);
+        return;
+      }
+      const [scene, entries] = await Promise.all([
+        api<StudioScene>(`/workplaces/${workplace.id}/scenes/${sceneList[0].id}`),
+        api<SceneCastEntry[]>(`/workplaces/${workplace.id}/scenes/${sceneList[0].id}/cast`),
+      ]);
+      if (alive) installScene(scene, entries);
+    }).catch((cause: any) => {
+      if (alive) setError(cause?.message || "无法读取场景");
+    }).finally(() => {
+      if (alive) setLoading(false);
+    });
+    return () => { alive = false; };
+  }, [workplace.id]);
+
+  function editScene(update: (previous: SceneDraft) => SceneDraft) {
+    setDraft(previous => previous ? update(previous) : previous);
+    setSceneDirty(true);
+  }
+
+  function editGiven(key: keyof SceneGivenCircumstances, value: string) {
+    editScene(previous => ({ ...previous, given_circumstances: { ...previous.given_circumstances, [key]: value } }));
+  }
+
+  function editDramatic(key: keyof SceneDramaticSituation, value: string) {
+    editScene(previous => ({ ...previous, dramatic_situation: { ...previous.dramatic_situation, [key]: value } }));
+  }
+
+  function editDirection(key: keyof SceneDirection, value: string) {
+    editScene(previous => ({ ...previous, direction: { ...previous.direction, [key]: value } }));
+  }
+
+  function editCast(index: number, key: keyof SceneCastDraft, value: string) {
+    setCast(previous => previous.map((entry, itemIndex) => itemIndex === index ? { ...entry, [key]: value } : entry));
+    setCastDirty(true);
+  }
+
+  function addToCast(character: StudioCharacter) {
+    if (cast.some(entry => entry.character_id === character.id)) return;
+    setCast(previous => [...previous, {
+      character_id: character.id,
+      character_name: character.name,
+      character_role: character.role,
+      objective: "", action: "", conflict: "", emotional_state: "",
+      performance_direction: "", subtext: "",
+    }]);
+    setCastDirty(true);
+  }
+
+  function removeFromCast(index: number) {
+    setCast(previous => previous.filter((_, itemIndex) => itemIndex !== index));
+    setCastDirty(true);
+  }
+
+  function moveCast(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= cast.length) return;
+    setCast(previous => {
+      const next = [...previous];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+    setCastDirty(true);
+  }
+
+  async function createScene() {
+    if (!newTitle.trim() || savingScene) return;
+    setSavingScene(true); setError("");
+    try {
+      const created = await api<StudioScene>(`/workplaces/${workplace.id}/scenes`, {
+        method: "POST",
+        body: {
+          title: newTitle.trim(), summary: newSummary.trim(), sort_order: scenes.length,
+          status: "draft", dialogue: "",
+          given_circumstances: { time: "", place: "", environment: "", background: "", prior_events: "" },
+          dramatic_situation: { central_question: "", primary_conflict: "", turn: "" },
+          direction: { blocking: "", spatial: "", performance_direction: "", camera: "" },
+        },
+      });
+      setScenes(previous => [...previous, created].sort((left, right) => left.sort_order - right.sort_order || left.created_at.localeCompare(right.created_at)));
+      installScene(created, []);
+      setModal(null); setNewTitle(""); setNewSummary("");
+      notify("新场景已建立");
+    } catch (cause: any) {
+      setError(cause?.message || "创建场景失败");
+    } finally {
+      setSavingScene(false);
+    }
+  }
+
+  async function saveScene() {
+    if (!active || !draft || savingScene) return;
+    if (!draft.title.trim()) { setError("场景标题不能为空"); return; }
+    setSavingScene(true); setError("");
+    try {
+      const saved = await api<StudioScene>(`/workplaces/${workplace.id}/scenes/${active.id}`, {
+        method: "PUT",
+        body: {
+          title: draft.title.trim(), summary: draft.summary, sort_order: draft.sort_order,
+          status: draft.status, given_circumstances: draft.given_circumstances,
+          dramatic_situation: draft.dramatic_situation, dialogue: draft.dialogue,
+          direction: draft.direction,
+        },
+      });
+      setActive(saved);
+      setDraft(sceneDraft(saved));
+      setScenes(previous => previous.map(scene => scene.id === saved.id ? saved : scene)
+        .sort((left, right) => left.sort_order - right.sort_order || left.created_at.localeCompare(right.created_at)));
+      setSceneDirty(false);
+      notify("场景已保存");
+    } catch (cause: any) {
+      setError(cause?.message || "保存场景失败");
+    } finally {
+      setSavingScene(false);
+    }
+  }
+
+  async function saveCast() {
+    if (!active || savingCast) return;
+    setSavingCast(true); setError("");
+    try {
+      const entries = await api<SceneCastEntry[]>(`/workplaces/${workplace.id}/scenes/${active.id}/cast`, {
+        method: "PUT",
+        body: {
+          cast: cast.map((entry, index) => ({
+            character_id: entry.character_id, objective: entry.objective,
+            action: entry.action, conflict: entry.conflict,
+            emotional_state: entry.emotional_state,
+            performance_direction: entry.performance_direction,
+            subtext: entry.subtext, sort_order: index,
+          })),
+        },
+      });
+      setCast(entries.map(castDraft));
+      setActive(previous => previous ? { ...previous, cast_count: entries.length } : previous);
+      setScenes(previous => previous.map(scene => scene.id === active.id ? { ...scene, cast_count: entries.length } : scene));
+      setCastDirty(false);
+      notify("Cast 已整体保存");
+    } catch (cause: any) {
+      setError(cause?.message || "保存 Cast 失败");
+    } finally {
+      setSavingCast(false);
+    }
+  }
+
+  async function deleteScene() {
+    if (!active || savingScene) return;
+    setSavingScene(true); setError("");
+    try {
+      await api<{ id: string }>(`/workplaces/${workplace.id}/scenes/${active.id}`, { method: "DELETE" });
+      const remaining = scenes.filter(scene => scene.id !== active.id);
+      setScenes(remaining);
+      setModal(null);
+      if (remaining.length) {
+        const [scene, entries] = await Promise.all([
+          api<StudioScene>(`/workplaces/${workplace.id}/scenes/${remaining[0].id}`),
+          api<SceneCastEntry[]>(`/workplaces/${workplace.id}/scenes/${remaining[0].id}/cast`),
+        ]);
+        installScene(scene, entries);
+      } else {
+        setActive(null); setDraft(null); setCast([]);
+        setSceneDirty(false); setCastDirty(false);
+      }
+      notify("场景已归档，Character 资源保持不变");
+    } catch (cause: any) {
+      setError(cause?.message || "删除场景失败");
+    } finally {
+      setSavingScene(false);
+    }
+  }
+
+  const castIds = new Set(cast.map(entry => entry.character_id));
+
+  function renderSceneList() {
+    if (loading && !scenes.length) return <div className="character-state"><span className="thinking-mark">✦</span><p>正在展开场景册……</p></div>;
+    if (!scenes.length) return <div className="character-state character-empty-state"><div className="empty-book">✦</div><h2>还没有场景。</h2><p>从一个具体的时刻开始：谁在这里，他们各自想要什么？</p><button className="tool-button primary" onClick={() => setModal("create")}><Icon name="plus"/>建立第一个场景</button></div>;
+    return <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-row ${active?.id === scene.id ? "active" : ""}`} onClick={() => void openScene(scene.id)}>
+      <span className="scene-row-number">{String(index + 1).padStart(2, "0")}</span>
+      <span className="scene-row-copy"><strong>{scene.title}</strong><small>{SCENE_STATUS_LABELS[scene.status]} · {scene.cast_count} 位角色</small><span>{scene.summary || scene.dramatic_situation?.central_question || "情境尚未写明"}</span></span>
+    </button>)}</div>;
+  }
+
+  function renderCastEditor() {
+    return <section className="scene-section cast-section">
+      <div className="scene-section-head"><div><div className="eyebrow">CASTING THE ROOM</div><h3>场景中的角色</h3><p>同一 Character 可以出现在多个场景中；这里的目标与冲突只属于当前情境，不会改写角色 Canon。</p></div><div className="scene-section-actions"><span className={castDirty ? "scene-dirty" : ""}>{castDirty ? "Cast 有未保存修改" : "Cast 已保存"}</span><button className="tool-button primary" disabled={savingCast || !castDirty} onClick={() => void saveCast()}>{savingCast ? "保存中…" : "保存整个 Cast"}</button></div></div>
+      <div className="cast-layout">
+        <div className="cast-entries">
+          {!cast.length && <div className="cast-empty"><strong>房间里还没有人。</strong><p>从右侧角色池选择角色加入，再分别写下他们在这一场里的目标与行动。</p></div>}
+          {cast.map((entry, index) => <article className="cast-card" key={entry.character_id}>
+            <div className="cast-card-head"><span className="cast-monogram">{entry.character_name.trim().slice(0, 1) || "?"}</span><div><strong>{entry.character_name}</strong><small>{entry.character_role || "未设定角色定位"}</small></div><div className="cast-order"><button aria-label="上移" disabled={index === 0} onClick={() => moveCast(index, -1)}>↑</button><button aria-label="下移" disabled={index === cast.length - 1} onClick={() => moveCast(index, 1)}>↓</button><button aria-label="移出 Cast" onClick={() => removeFromCast(index)}><Icon name="close"/></button></div></div>
+            <div className="scene-field-grid">{SCENE_CAST_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={entry[field.key]} onChange={(event: any) => editCast(index, field.key, event.target.value)}/></label>)}</div>
+          </article>)}
+        </div>
+        <aside className="character-pool">
+          <div className="character-pool-head"><div className="eyebrow brass-text">CHARACTER POOL</div><h4>可加入的角色</h4><p>身份来自现有 Character 资源，不在此处复制。</p></div>
+          {!characters.length && <div className="pool-empty">这个 Workplace 还没有可用角色。请先在角色档案中建立角色。</div>}
+          {characters.map(character => <button key={character.id} className={`pool-card ${castIds.has(character.id) ? "chosen" : ""}`} disabled={castIds.has(character.id)} onClick={() => addToCast(character)}>
+            <span className="pool-monogram">{character.name.trim().slice(0, 1) || "?"}</span><span><strong>{character.name}</strong><small>{character.role || "未设定定位"}</small><em>{characterAppearance(character)}</em></span><b>{castIds.has(character.id) ? "已在场" : "＋"}</b>
+          </button>)}
+        </aside>
+      </div>
+      {cast.length > 0 && <div className="cast-map"><div className="eyebrow">RELATIONS IN THIS SCENE</div><div className="cast-map-lines">{cast.map(entry => <p key={entry.character_id}><strong>{entry.character_name}</strong><span>{entry.objective || "目标尚未写明"}</span>{entry.conflict && <em>↔ {entry.conflict}</em>}</p>)}</div></div>}
+    </section>;
+  }
+
+  function renderSceneDetail() {
+    if (detailLoading) return <div className="character-state scene-detail-state"><span className="thinking-mark">✦</span><p>正在读取场景……</p></div>;
+    if (!active || !draft) return <div className="character-empty-detail"><div className="placeholder-ornament">✦</div><div className="eyebrow brass-text">SCENE &amp; CASTING</div><h2>给故事一个正在发生的时刻。</h2><p>场景不是另一份手稿。它记录人物为何聚集、彼此想要什么，以及这一场结束时发生了什么改变。</p><button className="tool-button primary" onClick={() => setModal("create")}><Icon name="plus"/>建立场景</button></div>;
+    return <div className="scene-detail-body">
+      <div className="scene-detail-head"><div><div className="eyebrow">SCENE {String(scenes.findIndex(scene => scene.id === active.id) + 1).padStart(2, "0")}</div><input className="scene-title-input" value={draft.title} maxLength={512} onChange={(event: any) => editScene(previous => ({ ...previous, title: event.target.value }))}/><label className="scene-status-field"><span>状态</span><select value={draft.status} onChange={(event: any) => editScene(previous => ({ ...previous, status: event.target.value as StudioScene["status"] }))}><option value="draft">草稿</option><option value="ready">可排演</option><option value="final">定稿</option></select></label></div><div className="scene-detail-actions"><span className={sceneDirty ? "scene-dirty" : ""}>{sceneDirty ? "场景有未保存修改" : "场景已保存"}</span><button className="head-btn delete-scene" onClick={() => setModal("delete")}>归档场景</button><button className="tool-button primary" disabled={savingScene || !sceneDirty} onClick={() => void saveScene()}>{savingScene ? "保存中…" : "保存场景"}</button></div></div>
+      <label className="scene-summary-field"><span>一句摘要</span><textarea rows={2} value={draft.summary} onChange={(event: any) => editScene(previous => ({ ...previous, summary: event.target.value }))} placeholder="用一句话说明这一场正在发生什么。"/></label>
+      <section className="scene-section"><div className="scene-section-head"><div className="eyebrow">GIVEN CIRCUMSTANCES</div><h3>既定情境</h3><p>人物无法选择、但必须回应的条件。</p></div><div className="scene-field-grid">{SCENE_GIVEN_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={draft.given_circumstances[field.key]} onChange={(event: any) => editGiven(field.key, event.target.value)}/></label>)}</div></section>
+      <section className="scene-section"><div className="scene-section-head"><div className="eyebrow">DRAMATIC SITUATION</div><h3>戏剧情境</h3><p>把空间里的压力说清楚，而不是罗列事件。</p></div><div className="scene-field-grid">{SCENE_DRAMATIC_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={draft.dramatic_situation[field.key]} onChange={(event: any) => editDramatic(field.key, event.target.value)}/></label>)}</div></section>
+      {renderCastEditor()}
+      <section className="scene-section"><div className="scene-section-head"><div><div className="eyebrow">DIALOGUE</div><h3>台词与叙事</h3><p>写下对白、潜台词与必要的叙事内容。Markdown 会作为连续文本保存。</p></div></div><textarea className="scene-manuscript" rows={12} value={draft.dialogue} onChange={(event: any) => editScene(previous => ({ ...previous, dialogue: event.target.value }))} placeholder="MARA&#10;你回来，是为了地图，还是为了那盏灯？&#10;&#10;（IL YAN 没有回答。他把钥匙放回桌上。）"/></section>
+      <section className="scene-section"><div className="scene-section-head"><div className="eyebrow">DIRECTION</div><h3>调度与镜头</h3><p>动作、空间、表演与未来影像的镜头建议。</p></div><div className="scene-field-grid">{SCENE_DIRECTION_FIELDS.map(field => <label key={field.key} className={`scene-field ${field.wide ? "wide" : ""}`}><span>{field.label}</span><small>{field.hint}</small><textarea rows={field.wide ? 3 : 2} value={draft.direction[field.key]} onChange={(event: any) => editDirection(field.key, event.target.value)}/></label>)}</div></section>
+      <div className="scene-save-footer"><span>场景与 Cast 分开保存。Cast 使用一次事务替换，失败时不会留下部分更新。</span><button className="tool-button primary" disabled={savingScene || !sceneDirty} onClick={() => void saveScene()}>{savingScene ? "保存中…" : "保存场景"}</button></div>
+    </div>;
+  }
+
+  return <div className="book-stage scene-stage">
+    <div className="book-topline"><div><span className="folio-brand">KHALA STUDIO</span><span className="top-separator">/</span><span className="world-title">{workplace.title}</span><span className="top-separator">/</span><span className="document-crumb">SCENES &amp; CASTING</span></div><div className="book-actions"><span className="character-count">{scenes.length} 个场景</span><button className="head-btn" onClick={() => { if (!sceneDirty && !castDirty || window.confirm("当前场景还有未保存修改，建立新场景会放弃它们。继续吗？")) setModal("create"); }}><Icon name="plus"/>新建场景</button></div></div>
+    <div className="scene-workspace">
+      <aside className="scene-index"><div className="character-index-head"><div className="eyebrow brass-text">THE STAGE BOOK</div><h1>场景与 Casting</h1><p>把人物放进具体情境，看他们如何行动、碰撞和改变。</p></div>{error && <div className="character-error">{error}<button onClick={() => setError("")}>关闭</button></div>}{renderSceneList()}</aside>
+      <main className="scene-detail">{renderSceneDetail()}</main>
+    </div>
+    {modal === "create" && <Modal title="建立新场景" eyebrow="A MOMENT ON STAGE" onClose={() => { setModal(null); setError(""); }} actions={<><button className="quiet-button" onClick={() => setModal(null)}>取消</button><button className="confirm-button" disabled={!newTitle.trim() || savingScene} onClick={() => void createScene()}>{savingScene ? "创建中…" : "建立场景"}</button></>}>
+      <p className="modal-intro">先给这个具体时刻一个名字。既定情境、Cast、台词和调度都可以之后逐步补全。</p>
+      {error && <p className="form-error">{error}</p>}
+      <label className="field-label">场景标题<input autoFocus value={newTitle} maxLength={512} onChange={(event: any) => setNewTitle(event.target.value)} placeholder="例如：潮线下的对峙"/></label>
+      <label className="field-label">一句摘要<textarea rows={3} value={newSummary} onChange={(event: any) => setNewSummary(event.target.value)} placeholder="谁在哪里，想要什么，阻力是什么。"/></label>
+    </Modal>}
+    {modal === "delete" && active && <Modal title="归档这个场景？" eyebrow="SOFT DELETE" onClose={() => setModal(null)} actions={<><button className="quiet-button" onClick={() => setModal(null)}>保留场景</button><button className="confirm-button danger-button" disabled={savingScene} onClick={() => void deleteScene()}>{savingScene ? "归档中…" : "确认归档"}</button></>}>
+      <p className="modal-intro">“{active.title}”会从场景列表隐藏，但记录与稳定 Scene ID 会保留。Character 资源、角色档案和其他场景中的 Cast 都不会被删除。</p>
+      {error && <p className="form-error">{error}</p>}
+    </Modal>}
   </div>;
 }
 
@@ -771,9 +1501,6 @@ function App() {
   }
 
   function placeholderCopy(active: Section) {
-    if (active === "characters") return {
-      label: "CHARACTER STUDIO", title: "让角色拥有完整的生命。", subtitle: "从文学身份、视觉人设到声音与表演，让每个角色在不同场景中保持一致。",
-      items: [{ icon: "IDENTITY", title: "文学身份", desc: "经历、性格、动机、恐惧、关系与角色弧线。" }, { icon: "APPEARANCE", title: "视觉人设", desc: "面貌、服装、配色、表情、姿势与标准形象。" }, { icon: "VOICE", title: "声音身份", desc: "音色、音域、口音、语速与表演状态。" }, { icon: "PERFORMANCE", title: "表演档案", desc: "肢体语言、情绪反应、行为习惯与角色行动。" }], status: "角色 API 尚未接入" };
     if (active === "scenes") return {
       label: "SCENE & CASTING", title: "把角色放进情境，让故事发生。", subtitle: "选择角色进入场景，为每个人确定目标、冲突、行动、对白和表演方式。",
       items: [{ icon: "SETTING", title: "规定情境", desc: "时间、地点、环境、事件背景与场景条件。" }, { icon: "CAST", title: "选角 Casting", desc: "从 Workplace 的角色库选择参与者。" }, { icon: "OBJECTIVES", title: "目标与冲突", desc: "角色想得到什么，以及彼此如何阻碍。" }, { icon: "DIRECTION", title: "导演设计", desc: "动作、对白、镜头、调度与情绪节奏。" }], status: "场景与选角 API 尚未接入" };
@@ -812,7 +1539,7 @@ function App() {
     return <section className="workplace-screen" style={{ "--editor-font-size": `${editorFontSize}px` } as any}>
       <header className="workplace-header"><div className="header-brand"><div className="brand-mark small">K</div><span>KHALA STUDIO</span></div><div className="header-title">{workplace?.title || ""}</div><div className="header-right"><span className="server-state"><i/>LOCAL WORKSPACE</span><button className="close-workspace" onClick={() => void closeWorkplace()}>合上书本</button></div></header>
       {renderSectionNav()}
-      {section === "writing" ? renderWritingSection() : section === "settings" ? renderSettings() : renderPlaceholderSection(section)}
+      {section === "writing" ? renderWritingSection() : section === "characters" ? <CharactersWorkspace workplace={workplace!} notify={notify}/> : section === "scenes" ? <ScenesWorkspace workplace={workplace!} notify={notify}/> : section === "settings" ? renderSettings() : renderPlaceholderSection(section)}
       {toast && <div className="toast-message">{toast}</div>}
     </section>;
   }

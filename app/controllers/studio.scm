@@ -225,6 +225,105 @@
            (studio-update-workplace! config (params rc "workplace_id")
                                      (body-json rc)))))))
 
+(get "/studio/api/v1/workplaces/:workplace_id/characters"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-characters config (params rc "workplace_id")))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/characters"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-create-character! config (params rc "workplace_id")
+                                      (body-json rc))
+            201)))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/characters/:character_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-get-character config (params rc "workplace_id")
+                                 (params rc "character_id")))))))
+
+(put "/studio/api/v1/workplaces/:workplace_id/characters/:character_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-update-character! config (params rc "workplace_id")
+                                     (params rc "character_id")
+                                     (body-json rc)))))))
+
+(page-delete "/studio/api/v1/workplaces/:workplace_id/characters/:character_id"
+        (lambda (rc)
+          (api-handler
+           (lambda ()
+             (reply-success
+              (studio-archive-character! config (params rc "workplace_id")
+                                         (params rc "character_id")))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/scenes"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-scenes config (params rc "workplace_id")))))))
+
+(post "/studio/api/v1/workplaces/:workplace_id/scenes"
+      (lambda (rc)
+        (api-handler
+         (lambda ()
+           (reply-success
+            (studio-create-scene! config (params rc "workplace_id")
+                                  (body-json rc))
+            201)))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-get-scene config (params rc "workplace_id")
+                             (params rc "scene_id")))))))
+
+(put "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-update-scene! config (params rc "workplace_id")
+                                 (params rc "scene_id")
+                                 (body-json rc)))))))
+
+(page-delete "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id"
+             (lambda (rc)
+               (api-handler
+                (lambda ()
+                  (reply-success
+                   (studio-delete-scene! config (params rc "workplace_id")
+                                         (params rc "scene_id")))))))
+
+(get "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id/cast"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-list-scene-cast config (params rc "workplace_id")
+                                   (params rc "scene_id")))))))
+
+(put "/studio/api/v1/workplaces/:workplace_id/scenes/:scene_id/cast"
+     (lambda (rc)
+       (api-handler
+        (lambda ()
+          (reply-success
+           (studio-update-scene-cast! config (params rc "workplace_id")
+                                      (params rc "scene_id")
+                                      (body-json rc)))))))
+
 (get "/studio/api/v1/workplaces/:workplace_id/documents"
      (lambda (rc)
        (api-handler

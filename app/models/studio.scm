@@ -5,6 +5,7 @@
   #:use-module (ice-9 format)
   #:use-module (ice-9 optargs)
   #:use-module (ice-9 textual-ports)
+  #:use-module (json)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-13)
   #:use-module (app models ollama)
@@ -16,6 +17,18 @@
             studio-create-workplace!
             studio-get-workplace
             studio-update-workplace!
+            studio-list-characters
+            studio-create-character!
+            studio-get-character
+            studio-update-character!
+            studio-archive-character!
+            studio-list-scenes
+            studio-create-scene!
+            studio-get-scene
+            studio-update-scene!
+            studio-delete-scene!
+            studio-list-scene-cast
+            studio-update-scene-cast!
             studio-list-documents
             studio-create-document!
             studio-get-document
@@ -34,6 +47,37 @@
 (define max-context-length 20000)
 (define max-instruction-length 4000)
 (define max-label-length 500)
+(define max-character-role-length 256)
+(define max-identity-field-length 20000)
+(define max-scene-text-length 500000)
+
+(define scene-statuses '("draft" "ready" "final"))
+(define scene-detail-fields
+  '("summary" "sort_order" "status"
+    "time" "place" "environment" "background" "prior_events"
+    "central_question" "primary_conflict" "turn"
+    "dialogue" "blocking" "spatial" "performance_direction" "camera"))
+(define scene-given-fields
+  '("time" "place" "environment" "background" "prior_events"))
+(define scene-dramatic-fields
+  '("central_question" "primary_conflict" "turn"))
+(define scene-direction-fields
+  '("blocking" "spatial" "performance_direction" "camera"))
+(define scene-cast-fields
+  '("objective" "action" "conflict" "emotional_state"
+    "performance_direction" "subtext" "sort_order"))
+
+(define character-identity-specs
+  '(("literary_identity"
+     "background" "personality" "values" "motivations"
+     "fears" "goals" "arc")
+    ("visual_identity"
+     "standard_appearance" "face" "body" "hair"
+     "clothing" "palette" "expressions" "posture")
+    ("vocal_identity"
+     "timbre" "range" "pitch" "accent" "pronunciation" "pace")
+    ("performance_identity"
+     "habits" "movement" "gestures" "emotional_responses" "situations")))
 
 (define missing (list 'missing))
 
@@ -132,6 +176,48 @@
     (or document
         (api-fail 404 "NOT_FOUND" "Document not found"))))
 
+(define (require-character config workplace-id character-id)
+  (let* ((id (require-uuid-in-path character-id "Character"))
+         (character (db:studio-get-character config workplace-id id)))
+    (or character
+        (api-fail 404 "NOT_FOUND" "Character not found"))))
+
+(define (identity-fields key)
+  (let ((entry (assoc key character-identity-specs)))
+    (and entry (cdr entry))))
+
+(define (identity-from-json text)
+  (if (or (not (string? text)) (string-null? text))
+      '()
+      (catch #t
+        (lambda ()
+          (let ((value (json-string->scm text)))
+            (if (or (null? value) (object? value)) value '())))
+        (lambda _ '()))))
+
+(define (identity-to-json value)
+  (if (null? value) "{}" (json-encode (json-normalize value))))
+
+(define (merge-identity key current incoming)
+  (unless (or (null? incoming) (object? incoming))
+    (api-fail 400 "VALIDATION_ERROR"
+              (format #f "~a must be an object" key)))
+  (let ((allowed (identity-fields key)))
+    (for-each
+     (lambda (entry)
+       (let ((field (car entry)))
+         (unless (member field allowed)
+           (api-fail 400 "VALIDATION_ERROR"
+                     (format #f "~a.~a is not supported" key field)))
+         (string-field incoming field #:allow-empty #t
+                       #:max max-identity-field-length)))
+     incoming)
+    (fold
+     (lambda (entry result)
+       (acons (car entry) (cdr entry)
+              (alist-delete (car entry) result equal?)))
+     current incoming)))
+
 (define (mark null-value)
   (if null-value null-value 'null))
 
@@ -205,6 +291,68 @@
    (if include-content
        `(("content" . ,(assoc-ref version 'content)))
        '())))
+
+(define (public-character character)
+  `(("id" . ,(assoc-ref character 'id))
+    ("workplace_id" . ,(assoc-ref character 'workplace_id))
+    ("name" . ,(assoc-ref character 'name))
+    ("role" . ,(assoc-ref character 'role))
+    ("summary" . ,(assoc-ref character 'summary))
+    ("literary_identity"
+     . ,(identity-from-json (assoc-ref character 'literary_identity)))
+    ("visual_identity"
+     . ,(identity-from-json (assoc-ref character 'visual_identity)))
+    ("vocal_identity"
+     . ,(identity-from-json (assoc-ref character 'vocal_identity)))
+    ("performance_identity"
+     . ,(identity-from-json (assoc-ref character 'performance_identity)))
+    ("created_at" . ,(assoc-ref character 'created_at))
+    ("updated_at" . ,(assoc-ref character 'updated_at))
+    ("archived_at" . ,(mark (assoc-ref character 'archived_at)))))
+
+(define (public-scene scene)
+  `(("id" . ,(assoc-ref scene 'id))
+    ("workplace_id" . ,(assoc-ref scene 'workplace_id))
+    ("title" . ,(assoc-ref scene 'title))
+    ("summary" . ,(assoc-ref scene 'summary))
+    ("sort_order" . ,(assoc-ref scene 'sort_order))
+    ("status" . ,(assoc-ref scene 'status))
+    ("given_circumstances"
+     . ,(map (lambda (field)
+               (cons field
+                     (or (assoc-ref scene (string->symbol field)) "")))
+             scene-given-fields))
+    ("dramatic_situation"
+     . ,(map (lambda (field)
+               (cons field
+                     (or (assoc-ref scene (string->symbol field)) "")))
+             scene-dramatic-fields))
+    ("dialogue" . ,(assoc-ref scene 'dialogue))
+    ("direction"
+     . ,(map (lambda (field)
+               (cons field
+                     (or (assoc-ref scene (string->symbol field)) "")))
+             scene-direction-fields))
+    ("cast_count" . ,(or (assoc-ref scene 'cast_count) 0))
+    ("created_at" . ,(assoc-ref scene 'created_at))
+    ("updated_at" . ,(assoc-ref scene 'updated_at))
+    ("deleted_at" . ,(mark (assoc-ref scene 'deleted_at)))))
+
+(define (public-scene-cast entry)
+  `(("id" . ,(assoc-ref entry 'id))
+    ("scene_id" . ,(assoc-ref entry 'scene_id))
+    ("character_id" . ,(assoc-ref entry 'character_id))
+    ("character_name" . ,(or (assoc-ref entry 'character_name) ""))
+    ("character_role" . ,(or (assoc-ref entry 'character_role) ""))
+    ("objective" . ,(assoc-ref entry 'objective))
+    ("action" . ,(assoc-ref entry 'action))
+    ("conflict" . ,(assoc-ref entry 'conflict))
+    ("emotional_state" . ,(assoc-ref entry 'emotional_state))
+    ("performance_direction" . ,(assoc-ref entry 'performance_direction))
+    ("subtext" . ,(assoc-ref entry 'subtext))
+    ("sort_order" . ,(assoc-ref entry 'sort_order))
+    ("created_at" . ,(assoc-ref entry 'created_at))
+    ("updated_at" . ,(assoc-ref entry 'updated_at))))
 
 (define (model-size path)
   (catch #t
@@ -337,6 +485,312 @@
         (public-workplace workplace)
         (public-workplace
          (db:studio-update-workplace! config workplace-id updates)))))
+
+(define (identity-from-body body key)
+  (if (not (object-has? body key))
+      "{}"
+      (let ((incoming (object-ref body key)))
+        (unless (or (null? incoming) (object? incoming))
+          (api-fail 400 "VALIDATION_ERROR"
+                    (format #f "~a must be an object" key)))
+        (identity-to-json (merge-identity key '() incoming)))))
+
+(define (studio-list-characters config workplace-id)
+  (let ((workplace (require-workplace config workplace-id)))
+    (map public-character
+         (db:studio-list-characters config (assoc-ref workplace 'id)))))
+
+(define (studio-create-character! config workplace-id body)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (name (string-field body "name" #:required #t
+                             #:max max-title-length))
+         (role (string-field body "role" #:allow-empty #t
+                             #:default "" #:max max-character-role-length))
+         (summary (string-field body "summary" #:allow-empty #t
+                                #:default "" #:max max-description-length))
+         (literary (identity-from-body body "literary_identity"))
+         (visual (identity-from-body body "visual_identity"))
+         (vocal (identity-from-body body "vocal_identity"))
+         (performance (identity-from-body body "performance_identity")))
+    (public-character
+     (db:studio-create-character! config (db:studio-new-id) wid name role
+                                  summary literary visual vocal performance))))
+
+(define (studio-get-character config workplace-id character-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id)))
+    (public-character (require-character config wid character-id))))
+
+(define (studio-update-character! config workplace-id character-id body)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (updates '()))
+    (when (object-has? body "name")
+      (set! updates
+            (acons 'name (string-field body "name" #:required #t
+                                       #:max max-title-length)
+                   updates)))
+    (when (object-has? body "role")
+      (set! updates
+            (acons 'role (string-field body "role" #:allow-empty #t
+                                       #:default "" #:max max-character-role-length)
+                   updates)))
+    (when (object-has? body "summary")
+      (set! updates
+            (acons 'summary (string-field body "summary" #:allow-empty #t
+                                          #:default "" #:max max-description-length)
+                   updates)))
+    (for-each
+     (lambda (key)
+       (when (object-has? body key)
+         (let* ((column (string->symbol key))
+                (current (identity-from-json (assoc-ref character column)))
+                (incoming (object-ref body key))
+                (merged (merge-identity key current incoming)))
+           (set! updates
+                 (acons column (identity-to-json merged) updates)))))
+     '("literary_identity" "visual_identity"
+       "vocal_identity" "performance_identity"))
+    (if (null? updates)
+        (public-character character)
+        (public-character
+         (or (db:studio-update-character! config wid cid updates)
+             (api-fail 404 "NOT_FOUND" "Character not found"))))))
+
+(define (studio-archive-character! config workplace-id character-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (character (require-character config wid character-id))
+         (cid (assoc-ref character 'id))
+         (archived (db:studio-archive-character! config wid cid)))
+    (or archived
+        (api-fail 404 "NOT_FOUND" "Character not found"))
+    `(("id" . ,cid)
+      ("workplace_id" . ,wid)
+      ("archived_at" . ,archived))))
+
+(define (require-object-fields object key allowed)
+  (unless (or (null? object) (object? object))
+    (api-fail 400 "VALIDATION_ERROR" (format #f "~a must be an object" key)))
+  (for-each
+   (lambda (entry)
+     (unless (member (car entry) allowed)
+       (api-fail 400 "VALIDATION_ERROR"
+                 (format #f "~a.~a is not supported" key (car entry)))))
+   object))
+
+(define* (scene-text-field object key #:key (default ""))
+  (string-field object key #:allow-empty #t #:default default
+                #:max max-scene-text-length))
+
+(define (scene-status-field body default)
+  (let ((status (string-field body "status" #:allow-empty #t
+                              #:default default #:max 16)))
+    (unless (member status scene-statuses)
+      (api-fail 400 "VALIDATION_ERROR" "status is not supported"))
+    status))
+
+(define (scene-create-values body)
+  (let* ((given (if (object-has? body "given_circumstances")
+                    (or (object-ref body "given_circumstances") '())
+                    '()))
+         (dramatic (if (object-has? body "dramatic_situation")
+                       (or (object-ref body "dramatic_situation") '())
+                       '()))
+         (direction (if (object-has? body "direction")
+                        (or (object-ref body "direction") '())
+                        '())))
+    (require-object-fields given "given_circumstances" scene-given-fields)
+    (require-object-fields dramatic "dramatic_situation" scene-dramatic-fields)
+    (require-object-fields direction "direction" scene-direction-fields)
+    `((title . ,(string-field body "title" #:required #t
+                              #:max max-title-length))
+      (summary . ,(scene-text-field body "summary"))
+      (sort_order . ,(optional-integer-field body "sort_order"
+                                             -1000000000 1000000000 0))
+      (status . ,(scene-status-field body "draft"))
+      (time . ,(scene-text-field given "time"))
+      (place . ,(scene-text-field given "place"))
+      (environment . ,(scene-text-field given "environment"))
+      (background . ,(scene-text-field given "background"))
+      (prior_events . ,(scene-text-field given "prior_events"))
+      (central_question . ,(scene-text-field dramatic "central_question"))
+      (primary_conflict . ,(scene-text-field dramatic "primary_conflict"))
+      (turn . ,(scene-text-field dramatic "turn"))
+      (dialogue . ,(scene-text-field body "dialogue"))
+      (blocking . ,(scene-text-field direction "blocking"))
+      (spatial . ,(scene-text-field direction "spatial"))
+      (performance_direction
+       . ,(scene-text-field direction "performance_direction"))
+      (camera . ,(scene-text-field direction "camera")))))
+
+(define (scene-update-values body)
+  (let ((updates '()))
+    (when (object-has? body "title")
+      (set! updates
+            (acons 'title (string-field body "title" #:required #t
+                                        #:max max-title-length)
+                   updates)))
+    (when (object-has? body "summary")
+      (set! updates (acons 'summary (scene-text-field body "summary") updates)))
+    (when (object-has? body "sort_order")
+      (set! updates
+            (acons 'sort_order
+                   (required-integer-field body "sort_order"
+                                           -1000000000 1000000000)
+                   updates)))
+    (when (object-has? body "status")
+      (set! updates (acons 'status (scene-status-field body "draft") updates)))
+    (for-each
+     (lambda (group)
+       (let ((key (car group))
+             (fields (cdr group)))
+         (when (object-has? body key)
+           (let ((object (object-ref body key)))
+             (require-object-fields object key fields)
+             (for-each
+              (lambda (field)
+                (when (object-has? object field)
+                  (set! updates
+                        (acons (string->symbol field)
+                               (scene-text-field object field)
+                               updates))))
+              fields)))))
+     `(("given_circumstances" . ,scene-given-fields)
+       ("dramatic_situation" . ,scene-dramatic-fields)
+       ("direction" . ,scene-direction-fields)))
+    updates))
+
+(define (scene-cast-array value)
+  (cond
+   ((vector? value) (vector->list value))
+   ((null? value) '())
+   ((object? value)
+    (api-fail 400 "VALIDATION_ERROR" "cast must be an array"))
+   ((list? value) value)
+   (else (api-fail 400 "VALIDATION_ERROR" "cast must be an array"))))
+
+(define (scene-cast-entry value index)
+  (unless (object? value)
+    (api-fail 400 "VALIDATION_ERROR"
+              (format #f "cast[~a] must be an object" index)))
+  (require-object-fields value (format #f "cast[~a]" index)
+                         (cons "character_id" scene-cast-fields))
+  (let ((character-id (string-field value "character_id" #:required #t
+                                    #:max 36)))
+    (unless (valid-uuid? character-id)
+      (api-fail 400 "VALIDATION_ERROR"
+                (format #f "cast[~a].character_id must be a UUID" index)))
+    `((character_id . ,(string-downcase character-id))
+      (objective . ,(scene-text-field value "objective"))
+      (action . ,(scene-text-field value "action"))
+      (conflict . ,(scene-text-field value "conflict"))
+      (emotional_state . ,(scene-text-field value "emotional_state"))
+      (performance_direction
+       . ,(scene-text-field value "performance_direction"))
+      (subtext . ,(scene-text-field value "subtext"))
+      (sort_order . ,(optional-integer-field value "sort_order"
+                                             -1000000000 1000000000 index)))))
+
+(define (scene-cast-values value)
+  (let* ((values (scene-cast-array value))
+         (entries (map scene-cast-entry values (iota (length values)))))
+    (let loop ((rest entries) (seen '()))
+      (when (pair? rest)
+        (let ((id (assoc-ref (car rest) 'character_id)))
+          (when (member id seen string=?)
+            (api-fail 400 "VALIDATION_ERROR"
+                      "A Character can only appear once in a Scene cast"))
+          (loop (cdr rest) (cons id seen)))))
+    entries))
+
+(define (studio-list-scenes config workplace-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id)))
+    (map public-scene (db:studio-list-scenes config wid))))
+
+(define (studio-create-scene! config workplace-id body)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id)))
+    (public-scene
+     (db:studio-create-scene! config (db:studio-new-id) wid
+                              (scene-create-values body)))))
+
+(define (studio-get-scene config workplace-id scene-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (id (require-uuid-in-path scene-id "Scene"))
+         (scene (db:studio-get-scene config wid id)))
+    (if scene
+        (public-scene scene)
+        (api-fail 404 "NOT_FOUND" "Scene not found"))))
+
+(define (studio-update-scene! config workplace-id scene-id body)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (id (require-uuid-in-path scene-id "Scene"))
+         (scene (db:studio-get-scene config wid id)))
+    (unless scene
+      (api-fail 404 "NOT_FOUND" "Scene not found"))
+    (let ((updates (scene-update-values body)))
+      (public-scene
+       (if (null? updates)
+           scene
+           (or (db:studio-update-scene! config wid id updates)
+               (api-fail 404 "NOT_FOUND" "Scene not found")))))))
+
+(define (studio-delete-scene! config workplace-id scene-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (id (require-uuid-in-path scene-id "Scene"))
+         (deleted (db:studio-delete-scene! config wid id)))
+    (or deleted
+        (api-fail 404 "NOT_FOUND" "Scene not found"))
+    `(("id" . ,id)
+      ("workplace_id" . ,wid)
+      ("deleted_at" . ,deleted))))
+
+(define (studio-list-scene-cast config workplace-id scene-id)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (id (require-uuid-in-path scene-id "Scene"))
+         (cast (db:studio-list-scene-cast config wid id)))
+    (if cast
+        (map public-scene-cast cast)
+        (api-fail 404 "NOT_FOUND" "Scene not found"))))
+
+(define (studio-update-scene-cast! config workplace-id scene-id body)
+  (let* ((workplace (require-workplace config workplace-id))
+         (wid (assoc-ref workplace 'id))
+         (id (require-uuid-in-path scene-id "Scene"))
+         (scene (db:studio-get-scene config wid id)))
+    (unless scene
+      (api-fail 404 "NOT_FOUND" "Scene not found"))
+    (unless (object-has? body "cast")
+      (api-fail 400 "VALIDATION_ERROR" "cast is required"))
+    (let ((entries (scene-cast-values (object-ref body "cast"))))
+      (for-each
+       (lambda (entry)
+         (unless (db:studio-get-character config wid
+                                          (assoc-ref entry 'character_id))
+           (api-fail 422 "INVALID_CAST_CHARACTER"
+                     "Every cast Character must belong to this Workplace")))
+       entries)
+      (catch 'studio-cast-error
+        (lambda ()
+          (map public-scene-cast
+               (db:studio-replace-scene-cast! config wid id entries)))
+        (lambda (key reason)
+          (case reason
+            ((scene-not-found) (api-fail 404 "NOT_FOUND" "Scene not found"))
+            ((character-not-found)
+             (api-fail 422 "INVALID_CAST_CHARACTER"
+                       "Every cast Character must belong to this Workplace"))
+            (else (api-fail 422 "INVALID_CAST"
+                          "The cast could not be updated"))))))))
 
 (define (studio-list-documents config workplace-id)
   (let ((workplace (require-workplace config workplace-id)))

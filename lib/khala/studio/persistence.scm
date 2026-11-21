@@ -14,6 +14,18 @@
             studio-get-workplace
             studio-touch-workplace!
             studio-update-workplace!
+            studio-list-characters
+            studio-create-character!
+            studio-get-character
+            studio-update-character!
+            studio-archive-character!
+            studio-list-scenes
+            studio-create-scene!
+            studio-get-scene
+            studio-update-scene!
+            studio-delete-scene!
+            studio-list-scene-cast
+            studio-replace-scene-cast!
             studio-list-documents
             studio-create-document!
             studio-get-document
@@ -71,7 +83,73 @@
    "CREATE INDEX IF NOT EXISTS studio_versions_document_created
       ON studio_document_versions(document_id, created_at DESC, revision DESC)"))
 
-(define (migrations) (list (cons 1 migration-1)))
+(define migration-2
+  (list
+   "CREATE TABLE IF NOT EXISTS studio_characters (
+      id TEXT PRIMARY KEY,
+      workplace_id TEXT NOT NULL REFERENCES studio_workplaces(id) ON DELETE CASCADE,
+      name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+      role TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '',
+      literary_identity TEXT NOT NULL DEFAULT '{}',
+      visual_identity TEXT NOT NULL DEFAULT '{}',
+      vocal_identity TEXT NOT NULL DEFAULT '{}',
+      performance_identity TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT
+    )"
+   "CREATE INDEX IF NOT EXISTS studio_characters_workplace_activity
+      ON studio_characters(workplace_id, archived_at, updated_at DESC)"))
+
+(define migration-3
+  (list
+   "CREATE TABLE IF NOT EXISTS studio_scenes (
+      id TEXT PRIMARY KEY,
+      workplace_id TEXT NOT NULL REFERENCES studio_workplaces(id) ON DELETE CASCADE,
+      title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+      summary TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'ready', 'final')),
+      time TEXT NOT NULL DEFAULT '',
+      place TEXT NOT NULL DEFAULT '',
+      environment TEXT NOT NULL DEFAULT '',
+      background TEXT NOT NULL DEFAULT '',
+      prior_events TEXT NOT NULL DEFAULT '',
+      central_question TEXT NOT NULL DEFAULT '',
+      primary_conflict TEXT NOT NULL DEFAULT '',
+      turn TEXT NOT NULL DEFAULT '',
+      dialogue TEXT NOT NULL DEFAULT '',
+      blocking TEXT NOT NULL DEFAULT '',
+      spatial TEXT NOT NULL DEFAULT '',
+      performance_direction TEXT NOT NULL DEFAULT '',
+      camera TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
+    )"
+   "CREATE INDEX IF NOT EXISTS studio_scenes_workplace_order
+      ON studio_scenes(workplace_id, deleted_at, sort_order, created_at)"
+   "CREATE TABLE IF NOT EXISTS studio_scene_cast (
+      id TEXT PRIMARY KEY,
+      scene_id TEXT NOT NULL REFERENCES studio_scenes(id) ON DELETE CASCADE,
+      character_id TEXT NOT NULL REFERENCES studio_characters(id) ON DELETE RESTRICT,
+      objective TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL DEFAULT '',
+      conflict TEXT NOT NULL DEFAULT '',
+      emotional_state TEXT NOT NULL DEFAULT '',
+      performance_direction TEXT NOT NULL DEFAULT '',
+      subtext TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(scene_id, character_id)
+    )"
+   "CREATE INDEX IF NOT EXISTS studio_scene_cast_order
+      ON studio_scene_cast(scene_id, sort_order, created_at)"))
+
+(define (migrations)
+  (list (cons 1 migration-1) (cons 2 migration-2) (cons 3 migration-3)))
 
 (define (studio-now)
   (strftime "%Y-%m-%dT%H:%M:%SZ" (gmtime (current-time))))
@@ -300,6 +378,309 @@
                  ", updated_at = ? WHERE id = ? AND archived_at IS NULL")
                 (append values (list now id))))
             (workplace-by-id db id)))))))
+
+(define character-columns
+  "id, workplace_id, name, role, summary, literary_identity, visual_identity,
+   vocal_identity, performance_identity, created_at, updated_at, archived_at")
+
+(define (character-from-row row)
+  `((id . ,(row-value row "id"))
+    (workplace_id . ,(row-value row "workplace_id"))
+    (name . ,(row-value row "name"))
+    (role . ,(row-value row "role"))
+    (summary . ,(row-value row "summary"))
+    (literary_identity . ,(or (row-value row "literary_identity") "{}"))
+    (visual_identity . ,(or (row-value row "visual_identity") "{}"))
+    (vocal_identity . ,(or (row-value row "vocal_identity") "{}"))
+    (performance_identity . ,(or (row-value row "performance_identity") "{}"))
+    (created_at . ,(row-value row "created_at"))
+    (updated_at . ,(row-value row "updated_at"))
+    (archived_at . ,(row-value row "archived_at"))))
+
+(define (character-by-id db workplace-id character-id)
+  (query db
+         (string-append "SELECT " character-columns " FROM studio_characters
+                         WHERE id = ? AND workplace_id = ? AND archived_at IS NULL")
+         character-id workplace-id)
+  (let ((row (dbi-get_row db))) (and row (character-from-row row))))
+
+(define (studio-list-characters config workplace-id)
+  (with-db config
+    (lambda (db)
+      (query db
+             (string-append
+              "SELECT " character-columns " FROM studio_characters
+               WHERE workplace_id = ? AND archived_at IS NULL
+               ORDER BY updated_at DESC, created_at DESC, name ASC")
+             workplace-id)
+      (map character-from-row (all-rows db)))))
+
+(define (studio-create-character! config id workplace-id name role summary
+                                  literary visual vocal performance)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now)))
+            (query db
+                   "INSERT INTO studio_characters
+                      (id, workplace_id, name, role, summary,
+                       literary_identity, visual_identity,
+                       vocal_identity, performance_identity,
+                       created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   id workplace-id name role summary
+                   literary visual vocal performance now now)
+            (character-by-id db workplace-id id)))))))
+
+(define (studio-get-character config workplace-id character-id)
+  (with-db config (lambda (db) (character-by-id db workplace-id character-id))))
+
+(define (studio-update-character! config workplace-id character-id updates)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let* ((now (studio-now))
+                 (clause (update-clause updates
+                                        '(name role summary
+                                          literary_identity visual_identity
+                                          vocal_identity performance_identity)))
+                 (sets (car clause))
+                 (values (cdr clause)))
+            (if (null? sets)
+                (character-by-id db workplace-id character-id)
+                (begin
+                  (dbi-params-query db
+                    (string-append
+                     "UPDATE studio_characters SET "
+                     (string-join sets ", ")
+                     ", updated_at = ? WHERE id = ? AND workplace_id = ?
+                       AND archived_at IS NULL")
+                    (append values (list now character-id workplace-id)))
+                  (and (> (dbi-affected-rows db) 0)
+                       (character-by-id db workplace-id character-id))))))))))
+
+(define (studio-archive-character! config workplace-id character-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now)))
+            (query db
+                   "UPDATE studio_characters
+                       SET archived_at = ?, updated_at = ?
+                     WHERE id = ? AND workplace_id = ? AND archived_at IS NULL"
+                   now now character-id workplace-id)
+            (and (> (dbi-affected-rows db) 0) now)))))))
+
+(define scene-columns
+  "id, workplace_id, title, summary, sort_order, status,
+   time, place, environment, background, prior_events,
+   central_question, primary_conflict, turn, dialogue,
+   blocking, spatial, performance_direction, camera,
+   created_at, updated_at, deleted_at")
+
+(define (scene-from-row row)
+  `((id . ,(row-value row "id"))
+    (workplace_id . ,(row-value row "workplace_id"))
+    (title . ,(row-value row "title"))
+    (summary . ,(or (row-value row "summary") ""))
+    (sort_order . ,(db-int (row-value row "sort_order")))
+    (status . ,(row-value row "status"))
+    (time . ,(or (row-value row "time") ""))
+    (place . ,(or (row-value row "place") ""))
+    (environment . ,(or (row-value row "environment") ""))
+    (background . ,(or (row-value row "background") ""))
+    (prior_events . ,(or (row-value row "prior_events") ""))
+    (central_question . ,(or (row-value row "central_question") ""))
+    (primary_conflict . ,(or (row-value row "primary_conflict") ""))
+    (turn . ,(or (row-value row "turn") ""))
+    (dialogue . ,(or (row-value row "dialogue") ""))
+    (blocking . ,(or (row-value row "blocking") ""))
+    (spatial . ,(or (row-value row "spatial") ""))
+    (performance_direction . ,(or (row-value row "performance_direction") ""))
+    (camera . ,(or (row-value row "camera") ""))
+    (created_at . ,(row-value row "created_at"))
+    (updated_at . ,(row-value row "updated_at"))
+    (deleted_at . ,(row-value row "deleted_at"))
+    (cast_count . ,(db-int (row-value row "cast_count")))))
+
+(define (scene-by-id db workplace-id scene-id)
+  (query db
+         (string-append
+          "SELECT s.id, s.workplace_id, s.title, s.summary, s.sort_order,
+                  s.status, s.time, s.place, s.environment, s.background,
+                  s.prior_events, s.central_question, s.primary_conflict,
+                  s.turn, s.dialogue, s.blocking, s.spatial,
+                  s.performance_direction, s.camera, s.created_at,
+                  s.updated_at, s.deleted_at,
+                  (SELECT COUNT(*) FROM studio_scene_cast c
+                   WHERE c.scene_id = s.id) AS cast_count
+             FROM studio_scenes s
+            WHERE s.id = ? AND s.workplace_id = ? AND s.deleted_at IS NULL")
+         scene-id workplace-id)
+  (let ((row (dbi-get_row db))) (and row (scene-from-row row))))
+
+(define (studio-list-scenes config workplace-id)
+  (with-db config
+    (lambda (db)
+      (query db
+             "SELECT s.id, s.workplace_id, s.title, s.summary, s.sort_order,
+                     s.status, s.time, s.place, s.environment, s.background,
+                     s.prior_events, s.central_question, s.primary_conflict,
+                     s.turn, s.dialogue, s.blocking, s.spatial,
+                     s.performance_direction, s.camera, s.created_at,
+                     s.updated_at, s.deleted_at,
+                     (SELECT COUNT(*) FROM studio_scene_cast c
+                      WHERE c.scene_id = s.id) AS cast_count
+                FROM studio_scenes s
+               WHERE s.workplace_id = ? AND s.deleted_at IS NULL
+               ORDER BY s.sort_order ASC, s.created_at ASC, s.id ASC"
+             workplace-id)
+      (map scene-from-row (all-rows db)))))
+
+(define (studio-create-scene! config id workplace-id values)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now))
+                (field (lambda (key) (or (assoc-ref values key) ""))))
+            (query db
+                   "INSERT INTO studio_scenes
+                      (id, workplace_id, title, summary, sort_order, status,
+                       time, place, environment, background, prior_events,
+                       central_question, primary_conflict, turn, dialogue,
+                       blocking, spatial, performance_direction, camera,
+                       created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   id workplace-id (assoc-ref values 'title)
+                   (field 'summary) (assoc-ref values 'sort_order)
+                   (assoc-ref values 'status)
+                   (field 'time) (field 'place) (field 'environment)
+                   (field 'background) (field 'prior_events)
+                   (field 'central_question) (field 'primary_conflict)
+                   (field 'turn) (field 'dialogue) (field 'blocking)
+                   (field 'spatial) (field 'performance_direction)
+                   (field 'camera) now now)
+            (scene-by-id db workplace-id id)))))))
+
+(define (studio-get-scene config workplace-id scene-id)
+  (with-db config (lambda (db) (scene-by-id db workplace-id scene-id))))
+
+(define (studio-update-scene! config workplace-id scene-id updates)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let* ((now (studio-now))
+                 (clause (update-clause
+                          updates
+                          '(title summary sort_order status time place
+                            environment background prior_events
+                            central_question primary_conflict turn dialogue
+                            blocking spatial performance_direction camera)))
+                 (sets (car clause))
+                 (values (cdr clause)))
+            (if (null? sets)
+                (scene-by-id db workplace-id scene-id)
+                (begin
+                  (dbi-params-query db
+                    (string-append
+                     "UPDATE studio_scenes SET "
+                     (string-join sets ", ")
+                     ", updated_at = ? WHERE id = ? AND workplace_id = ?
+                       AND deleted_at IS NULL")
+                    (append values (list now scene-id workplace-id)))
+                  (and (> (dbi-affected-rows db) 0)
+                       (scene-by-id db workplace-id scene-id))))))))))
+
+(define (studio-delete-scene! config workplace-id scene-id)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (let ((now (studio-now)))
+            (query db
+                   "UPDATE studio_scenes SET deleted_at = ?, updated_at = ?
+                     WHERE id = ? AND workplace_id = ? AND deleted_at IS NULL"
+                   now now scene-id workplace-id)
+            (and (> (dbi-affected-rows db) 0) now)))))))
+
+(define scene-cast-columns
+  "c.id, c.scene_id, c.character_id, c.objective, c.action, c.conflict,
+   c.emotional_state, c.performance_direction, c.subtext, c.sort_order,
+   c.created_at, c.updated_at, ch.name AS character_name,
+   ch.role AS character_role")
+
+(define (scene-cast-from-row row)
+  `((id . ,(row-value row "id"))
+    (scene_id . ,(row-value row "scene_id"))
+    (character_id . ,(row-value row "character_id"))
+    (objective . ,(or (row-value row "objective") ""))
+    (action . ,(or (row-value row "action") ""))
+    (conflict . ,(or (row-value row "conflict") ""))
+    (emotional_state . ,(or (row-value row "emotional_state") ""))
+    (performance_direction . ,(or (row-value row "performance_direction") ""))
+    (subtext . ,(or (row-value row "subtext") ""))
+    (sort_order . ,(db-int (row-value row "sort_order")))
+    (created_at . ,(row-value row "created_at"))
+    (updated_at . ,(row-value row "updated_at"))
+    (character_name . ,(or (row-value row "character_name") ""))
+    (character_role . ,(or (row-value row "character_role") ""))))
+
+(define (scene-cast-by-scene db scene-id)
+  (query db
+         (string-append "SELECT " scene-cast-columns "
+                         FROM studio_scene_cast c
+                         JOIN studio_characters ch ON ch.id = c.character_id
+                         WHERE c.scene_id = ?
+                         ORDER BY c.sort_order ASC, c.created_at ASC, c.id ASC")
+         scene-id)
+  (map scene-cast-from-row (all-rows db)))
+
+(define (studio-list-scene-cast config workplace-id scene-id)
+  (with-db config
+    (lambda (db)
+      (and (scene-by-id db workplace-id scene-id)
+           (scene-cast-by-scene db scene-id)))))
+
+(define (studio-replace-scene-cast! config workplace-id scene-id entries)
+  (with-db config
+    (lambda (db)
+      (with-transaction db
+        (lambda ()
+          (unless (scene-by-id db workplace-id scene-id)
+            (throw 'studio-cast-error 'scene-not-found))
+          (for-each
+           (lambda (entry)
+             (query db
+                    "SELECT id FROM studio_characters
+                      WHERE id = ? AND workplace_id = ? AND archived_at IS NULL"
+                    (assoc-ref entry 'character_id) workplace-id)
+             (unless (dbi-get_row db)
+               (throw 'studio-cast-error 'character-not-found)))
+           entries)
+          (query db "DELETE FROM studio_scene_cast WHERE scene_id = ?" scene-id)
+          (let ((now (studio-now))
+                (field (lambda (entry key)
+                         (or (assoc-ref entry key) ""))))
+            (for-each
+             (lambda (entry)
+               (query db
+                      "INSERT INTO studio_scene_cast
+                         (id, scene_id, character_id, objective, action,
+                          conflict, emotional_state, performance_direction,
+                          subtext, sort_order, created_at, updated_at)
+                       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                      (studio-new-id) scene-id (assoc-ref entry 'character_id)
+                      (field entry 'objective) (field entry 'action)
+                      (field entry 'conflict) (field entry 'emotional_state)
+                      (field entry 'performance_direction) (field entry 'subtext)
+                      (or (assoc-ref entry 'sort_order) 0) now now))
+             entries))
+          (scene-cast-by-scene db scene-id))))))
 
 (define document-columns
   "id, workplace_id, parent_id, kind, title, content, content_format,

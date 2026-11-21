@@ -26,12 +26,20 @@ studio_model =
 - The existing `engine` setting selects the adapter. Supported values are
   `fake` and `sonicboom`; Studio does not introduce another inference backend.
 
-The database is initialized on first use. Migration version `1` creates:
+The database is initialized on first use and runs migrations through version
+`3`. The schema includes:
 
 - `studio_schema_migrations`
 - `studio_workplaces`
 - `studio_documents`
 - `studio_document_versions`
+- `studio_characters`
+- `studio_scenes`
+- `studio_scene_cast`
+
+`studio_characters` stores a stable UUID, `workplace_id`, `name`, `role`,
+`summary`, four independent JSON identity objects, timestamps, and a nullable
+`archived_at` soft-delete marker.
 
 All mutations use SQLite transactions and parameterized SQL. Foreign keys and a
 five-second busy timeout are enabled for every connection.
@@ -101,6 +109,208 @@ curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPL
 
 `cover_color` must be a `#RRGGBB` value. `cover_asset_id` accepts a UUID or
 `null`; arbitrary filesystem paths are rejected.
+
+## Characters
+
+Characters are first-class Workplace resources with a stable UUID. They are
+not documents and can therefore be referenced by future Scenes, Assets and
+Productions without duplicating identity data.
+
+List non-archived characters:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters
+```
+
+Create a character. Identity sections are independent JSON objects; omitted
+sections start empty:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"Mara Vale",
+    "role":"Protagonist",
+    "summary":"A cartographer returning to the coast.",
+    "literary_identity":{
+      "background":"Raised beside the northern harbor.",
+      "personality":"Observant and guarded.",
+      "values":"Loyalty to place.",
+      "motivations":"Find the drowned district.",
+      "fears":"Being lost at sea.",
+      "goals":"Complete the map.",
+      "arc":"From guarded exile to chosen belonging."
+    },
+    "visual_identity":{
+      "standard_appearance":"Tall, weathered blue coat.",
+      "face":"Sharp features and salt-burned skin.",
+      "body":"Lean and weather-hardened.",
+      "hair":"Dark, cut short.",
+      "clothing":"Blue harbor coat, brass compass.",
+      "palette":"Sea blue, brass, wet stone.",
+      "expressions":"Still eyes; rare, brief smile.",
+      "posture":"Square shoulders, hands never fully at rest."
+    },
+    "vocal_identity":{
+      "timbre":"Low and dry.",
+      "range":"Narrow, controlled.",
+      "pitch":"Slightly below average.",
+      "accent":"Northern harbor.",
+      "pronunciation":"Swallows final consonants.",
+      "pace":"Measured with long pauses."
+    },
+    "performance_identity":{
+      "habits":"Taps the table twice before speaking.",
+      "movement":"Deliberate, economical.",
+      "gestures":"Turns the compass when thinking.",
+      "emotional_responses":"Goes quiet when challenged.",
+      "situations":"Formal under authority; unguarded only near water."
+    }
+  }'
+```
+
+Read a full character:
+
+```sh
+CHARACTER_ID=00000000-0000-4000-8000-000000000003
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID
+```
+
+Update one identity section without touching the other three. Keys not present
+in the request are left unchanged. Unknown identity fields return HTTP `400`:
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID \
+  -H 'Content-Type: application/json' \
+  -d '{"visual_identity":{"clothing":"Blue harbor coat with a repaired sleeve."}}'
+```
+
+Archive a character with a soft delete:
+
+```sh
+curl --noproxy '*' -X DELETE http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/characters/$CHARACTER_ID
+```
+
+Archived characters disappear from list and detail responses, while the row
+and stable UUID remain in `studio_characters` for future references. Every
+nested character request verifies that both the Workplace and Character exist
+and belong together.
+
+The visual identity is author-controlled Canon. This API has no generation
+path that can modify it; future AI suggestions must be approved by the author
+before being written through this `PUT` endpoint.
+
+## Scenes and Casting
+
+A Scene is a staged dramatic situation, not another document. Its structured
+fields stay separate from Writing and from the persistent Character identity.
+`given_circumstances`, `dramatic_situation`, and `direction` are nested objects
+in the API; SQLite stores them in explicit columns in `studio_scenes`.
+
+List non-deleted Scenes ordered by `sort_order`:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes
+```
+
+Create a Scene:
+
+```sh
+curl --noproxy '*' -X POST http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title":"The Drowned District",
+    "summary":"A confrontation at the tide line.",
+    "sort_order":1,
+    "status":"draft",
+    "given_circumstances":{
+      "time":"Before dawn",
+      "place":"The northern harbor",
+      "environment":"Fog and low tide",
+      "background":"The district was abandoned ten years ago.",
+      "prior_events":"Mara found the old survey map."
+    },
+    "dramatic_situation":{
+      "central_question":"Will Mara admit why she returned?",
+      "primary_conflict":"Mara wants the truth; Ilyan wants her gone.",
+      "turn":"Ilyan reveals the lighthouse was never abandoned."
+    },
+    "dialogue":"MARA\nYou came back.",
+    "direction":{
+      "blocking":"Mara stays between Ilyan and the stairs.",
+      "spatial":"A narrow pier above black water.",
+      "performance_direction":"Speak quietly.",
+      "camera":"Hold on the survey map."
+    }
+  }'
+```
+
+`status` is one of `draft`, `ready`, or `final`. Scene text fields are limited
+to 500,000 characters each. Unknown fields inside the nested objects return
+HTTP `400`.
+
+Read a Scene:
+
+```sh
+SCENE_ID=00000000-0000-4000-8000-000000000004
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID
+```
+
+Update Scene fields. A nested object may be partial; omitted fields keep their
+current values:
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"ready","dramatic_situation":{"turn":"The lamp is still warm."},"direction":{"camera":"Slow push toward the stair."}}'
+```
+
+Archive a Scene with a soft delete. Its Character rows and Cast relationship
+rows are not deleted:
+
+```sh
+curl --noproxy '*' -X DELETE http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID
+```
+
+### Scene Cast
+
+Cast entries reference an existing Character UUID. The same Character may
+appear in many Scenes, with different objectives and behaviour in each one.
+Objective, Action, Conflict, Emotional State, Performance Direction, and
+Subtext belong to the Scene Cast entry and never overwrite Character identity.
+
+Read the cast, including stable Character IDs and current Character names:
+
+```sh
+curl --noproxy '*' http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/cast
+```
+
+Replace the entire cast in one transaction:
+
+```sh
+curl --noproxy '*' -X PUT http://127.0.0.1:3000/studio/api/v1/workplaces/$WORKPLACE_ID/scenes/$SCENE_ID/cast \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "cast":[
+      {
+        "character_id":"00000000-0000-4000-8000-000000000003",
+        "objective":"Make Ilyan admit he lied.",
+        "action":"Ask a question he cannot answer.",
+        "conflict":"Ilyan refuses to look at the map.",
+        "emotional_state":"Controlled anger.",
+        "performance_direction":"Do not raise her voice.",
+        "subtext":"She already knows.",
+        "sort_order":0
+      }
+    ]
+  }'
+```
+
+Every referenced Character must be non-archived and belong to the same
+Workplace. A cross-Workplace or unknown Character returns HTTP `422` with
+`INVALID_CAST_CHARACTER`. Duplicate Characters in one cast return HTTP `400`.
+The update deletes and recreates cast rows inside `BEGIN IMMEDIATE`; if any
+validation or insert fails, the previous cast remains intact.
 
 ## Documents
 
@@ -243,9 +453,9 @@ The continuation prompt lives in `conf/studio-prompts/continue.md`.
 | Status | Meaning |
 |---:|---|
 | `200` | Success. |
-| `201` | Workplace, document, or version created. |
+| `201` | Workplace, character, document, or version created. |
 | `400` | Invalid JSON, UUID, enum, string, or numeric input. |
-| `404` | Workplace, document, or version not found. |
+| `404` | Workplace, character, document, or version not found. |
 | `409` | `REVISION_CONFLICT`; the response includes `current_revision`. |
 | `413` | Request body exceeds 4 MiB. |
 | `422` | Invalid resource state, such as a parent from another Workplace. |
@@ -264,10 +474,12 @@ Open the prototype at:
 http://127.0.0.1:3000/studio
 ```
 
-The existing page in `app/views/studio/studio.html.tpl` now loads Workplaces and
-documents from this API, autosaves with `expected_revision`, requests
-inspiration, consumes continuation SSE, and inserts accepted text into the
-continuous document. The page retains its original layout and styling.
+The React bundle in `studio-ui/` loads Workplaces, documents and Characters from
+this API. The Characters workspace creates and edits the four identity sections
+independently, persists them to SQLite, and archives characters with a soft
+delete. Writing continues to autosave with `expected_revision`, request
+inspiration, consume continuation SSE, and insert accepted text only after the
+author approves it.
 
 ## Tests
 

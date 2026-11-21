@@ -25,7 +25,7 @@
            (else entry)))
        (load-config)))
 
-(check 'fresh-schema (= 1 (studio-schema-version config)))
+(check 'fresh-schema (= 3 (studio-schema-version config)))
 
 (define workplace
   (studio-create-workplace! config (studio-new-id) "Persistence World"
@@ -102,6 +102,201 @@
 (check 'documents-are-workplace-scoped
        (not (studio-get-document config (assoc-ref other-workplace 'id)
                                  document-id)))
+
+(define character
+  (studio-create-character! config (studio-new-id) workplace-id
+                            "Mara Vale" "Protagonist" "A cartographer."
+                            "{\"background\":\"Raised by the coast.\"}"
+                            "{\"standard_appearance\":\"Tall, weathered coat.\"}"
+                            "{\"timbre\":\"Low and dry.\"}"
+                            "{\"habits\":\"Taps twice before speaking.\"}"))
+(define character-id (assoc-ref character 'id))
+(check 'character-created
+       (and character-id
+            (equal? (assoc-ref character 'name) "Mara Vale")))
+(check 'character-listed
+       (equal? (map (lambda (entry) (assoc-ref entry 'id))
+                    (studio-list-characters config workplace-id))
+               (list character-id)))
+(check 'character-identities-roundtrip
+       (and (string-contains (assoc-ref character 'literary_identity)
+                             "Raised by the coast.")
+            (string-contains (assoc-ref character 'visual_identity)
+                             "weathered coat")))
+
+(define updated-character
+  (studio-update-character! config workplace-id character-id
+                            `((visual_identity . "{\"clothing\":\"Blue coat.\"}")
+                              (role . "POV character"))))
+(check 'character-updated
+       (and (equal? (assoc-ref updated-character 'role) "POV character")
+            (string-contains (assoc-ref updated-character 'visual_identity)
+                             "Blue coat")))
+(check 'character-update-preserves-other-identities
+       (string-contains (assoc-ref updated-character 'vocal_identity)
+                        "Low and dry"))
+(check 'characters-are-workplace-scoped
+       (not (studio-get-character config (assoc-ref other-workplace 'id)
+                                  character-id)))
+
+(define scene
+  (studio-create-scene! config (studio-new-id) workplace-id
+                        `((title . "The Drowned District")
+                          (summary . "A confrontation at the tide line.")
+                          (sort_order . 1)
+                          (status . "draft")
+                          (time . "Before dawn")
+                          (place . "Northern harbor")
+                          (environment . "Fog and low tide")
+                          (background . "Abandoned for ten years.")
+                          (prior_events . "Mara found the survey map.")
+                          (central_question . "Will Mara admit why she returned?")
+                          (primary_conflict . "Mara wants the truth; Ilyan wants her gone.")
+                          (turn . "The lighthouse was never abandoned.")
+                          (dialogue . "MARA\nYou came back.")
+                          (blocking . "Mara stays between Ilyan and the stairs.")
+                          (spatial . "A narrow pier above black water.")
+                          (performance_direction . "Speak quietly; do not cross the center line.")
+                          (camera . "Hold on the map in Mara's hand."))))
+(define scene-id (assoc-ref scene 'id))
+(check 'scene-created
+       (and scene-id
+            (equal? (assoc-ref scene 'title) "The Drowned District")
+            (equal? (assoc-ref scene 'time) "Before dawn")))
+(check 'scene-listed
+       (equal? (map (lambda (entry) (assoc-ref entry 'id))
+                    (studio-list-scenes config workplace-id))
+               (list scene-id)))
+(check 'scene-roundtrip
+       (equal? (assoc-ref (studio-get-scene config workplace-id scene-id)
+                          'central_question)
+               "Will Mara admit why she returned?"))
+
+(studio-update-scene! config workplace-id scene-id
+                      `((title . "The Drowned District, Revised")
+                        (status . "ready")
+                        (place . "The tide stair")
+                        (direction . "unused")))
+(define updated-scene (studio-get-scene config workplace-id scene-id))
+(check 'scene-updated
+       (and (equal? (assoc-ref updated-scene 'title)
+                    "The Drowned District, Revised")
+            (equal? (assoc-ref updated-scene 'status) "ready")
+            (equal? (assoc-ref updated-scene 'place) "The tide stair")))
+
+(define cast
+  (studio-replace-scene-cast! config workplace-id scene-id
+                              (list `((character_id . ,character-id)
+                                      (objective . "Make Ilyan admit he lied.")
+                                      (action . "Ask a question he cannot answer.")
+                                      (conflict . "Ilyan refuses to look at the map.")
+                                      (emotional_state . "Controlled anger.")
+                                      (performance_direction . "Do not raise her voice.")
+                                      (subtext . "She already knows.")
+                                      (sort_order . 0)))))
+(check 'cast-created
+       (and (= 1 (length cast))
+            (equal? (assoc-ref (car cast) 'character_name) "Mara Vale")
+            (equal? (assoc-ref (car cast) 'objective)
+                    "Make Ilyan admit he lied.")))
+(check 'cast-listed
+       (equal? (map (lambda (entry) (assoc-ref entry 'id))
+                    (studio-list-scene-cast config workplace-id scene-id))
+               (map (lambda (entry) (assoc-ref entry 'id)) cast)))
+
+(define second-scene
+  (studio-create-scene! config (studio-new-id) workplace-id
+                        `((title . "The Empty Lighthouse")
+                          (summary . "What remains after the argument.")
+                          (sort_order . 2)
+                          (status . "draft")
+                          (time . "Midday")
+                          (place . "Lighthouse stair")
+                          (environment . "Salt wind")
+                          (background . "")
+                          (prior_events . "The pier confrontation.")
+                          (central_question . "Who is willing to leave first?")
+                          (primary_conflict . "Neither will abandon the light.")
+                          (turn . "The lamp is still warm.")
+                          (dialogue . "")
+                          (blocking . "")
+                          (spatial . "")
+                          (performance_direction . "")
+                          (camera . ""))))
+(define second-scene-id (assoc-ref second-scene 'id))
+(studio-replace-scene-cast! config workplace-id second-scene-id
+                            (list `((character_id . ,character-id)
+                                    (objective . "Protect the evidence.")
+                                    (action . "Block the stair.")
+                                    (conflict . "She cannot guard it forever.")
+                                    (emotional_state . "Exhausted resolve.")
+                                    (performance_direction . "")
+                                    (subtext . "")
+                                    (sort_order . 0))))
+(check 'same-character-can-appear-in-multiple-scenes
+       (and (= 1 (length (studio-list-scene-cast config workplace-id scene-id)))
+            (= 1 (length (studio-list-scene-cast config workplace-id second-scene-id)))))
+
+(define other-character
+  (studio-create-character! config (studio-new-id)
+                            (assoc-ref other-workplace 'id)
+                            "Ilyan Ro" "Antagonist" "Harbor keeper."
+                            "{}" "{}" "{}" "{}"))
+(define other-character-id (assoc-ref other-character 'id))
+(define cast-before (studio-list-scene-cast config workplace-id second-scene-id))
+(define rejected
+  (catch 'studio-cast-error
+    (lambda ()
+      (studio-replace-scene-cast! config workplace-id second-scene-id
+                                  (list `((character_id . ,character-id)
+                                          (objective . "Valid entry.")
+                                          (action . "")
+                                          (conflict . "")
+                                          (emotional_state . "")
+                                          (performance_direction . "")
+                                          (subtext . "")
+                                          (sort_order . 0))
+                                        `((character_id . ,other-character-id)
+                                          (objective . "Cross-workplace entry.")
+                                          (action . "")
+                                          (conflict . "")
+                                          (emotional_state . "")
+                                          (performance_direction . "")
+                                          (subtext . "")
+                                          (sort_order . 1))))
+      #f)
+    (lambda (key reason) reason)))
+(check 'cast-cross-workplace-rejected
+       (eq? rejected 'character-not-found))
+(check 'cast-transaction-rolls-back
+       (equal? (map (lambda (entry) (assoc-ref entry 'id)) cast-before)
+               (map (lambda (entry) (assoc-ref entry 'id))
+                    (studio-list-scene-cast config workplace-id second-scene-id))))
+(check 'scenes-are-workplace-scoped
+       (not (studio-get-scene config (assoc-ref other-workplace 'id) scene-id)))
+
+(define deleted-at (studio-delete-scene! config workplace-id scene-id))
+(check 'scene-soft-deleted
+       (and deleted-at
+            (not (studio-get-scene config workplace-id scene-id))
+            (not (any (lambda (entry)
+                        (equal? (assoc-ref entry 'id) scene-id))
+                      (studio-list-scenes config workplace-id)))))
+(check 'scene-delete-keeps-character
+       (and (studio-get-character config workplace-id character-id)
+            (= 1 (length (studio-list-scene-cast config workplace-id
+                                                 second-scene-id)))))
+(check 'scene-delete-is-not-repeated
+       (not (studio-delete-scene! config workplace-id scene-id)))
+
+(define archived-at
+  (studio-archive-character! config workplace-id character-id))
+(check 'character-soft-deleted
+       (and archived-at
+            (not (studio-get-character config workplace-id character-id))
+            (null? (studio-list-characters config workplace-id))))
+(check 'character-archive-is-not-repeated
+       (not (studio-archive-character! config workplace-id character-id)))
 
 (cleanup)
 (format #t "studio persistence tests passed~%")

@@ -84,6 +84,342 @@ updated_workplace = json_request(
 )
 check("workplace-updated", updated_workplace["description"] == "updated")
 
+character = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters",
+    {
+        "name": "Mara Vale",
+        "role": "Protagonist",
+        "summary": "A cartographer returning to the coast.",
+        "literary_identity": {
+            "background": "Raised beside the northern harbor.",
+            "personality": "Observant and guarded.",
+            "goals": "Map the drowned district.",
+        },
+        "visual_identity": {
+            "standard_appearance": "Tall, weathered blue coat.",
+            "hair": "Dark, cut short.",
+            "palette": "Sea blue, brass, wet stone.",
+        },
+        "vocal_identity": {
+            "timbre": "Low and dry.",
+            "pace": "Measured.",
+        },
+        "performance_identity": {
+            "habits": "Taps the table twice before speaking.",
+            "situations": "Goes quiet when challenged.",
+        },
+    },
+    201,
+)
+character_id = character["id"]
+check(
+    "character-created",
+    character["workplace_id"] == workplace_id
+    and character["literary_identity"]["background"].startswith("Raised"),
+)
+characters = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/characters"
+)
+check("character-listed", any(item["id"] == character_id for item in characters))
+
+updated_character = json_request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters/{character_id}",
+    {
+        "role": "Point-of-view character",
+        "literary_identity": {"fears": "Being lost at sea."},
+    },
+)
+check(
+    "character-identity-independent-update",
+    updated_character["role"] == "Point-of-view character"
+    and updated_character["literary_identity"]["fears"] == "Being lost at sea."
+    and updated_character["literary_identity"]["background"].startswith("Raised")
+    and updated_character["visual_identity"]["palette"].startswith("Sea blue")
+    and updated_character["vocal_identity"]["timbre"] == "Low and dry."
+    and updated_character["performance_identity"]["habits"].startswith("Taps"),
+)
+character_detail = json_request(
+    "GET",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters/{character_id}",
+)
+check(
+    "character-detail",
+    character_detail["name"] == "Mara Vale"
+    and character_detail["visual_identity"]["hair"] == "Dark, cut short.",
+)
+
+status, body, _ = request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters/{character_id}",
+    {"visual_identity": {"unsupported_field": "value"}},
+)
+check(
+    "character-identity-validated",
+    status == 400 and json.loads(body)["error"]["code"] == "VALIDATION_ERROR",
+)
+
+other_workplace = json_request(
+    "POST",
+    "/studio/api/v1/workplaces",
+    {"title": "Other World", "description": "", "cover_color": "#354B40"},
+    201,
+)
+other_workplace_id = other_workplace["id"]
+other_characters = json_request(
+    "GET", f"/studio/api/v1/workplaces/{other_workplace_id}/characters"
+)
+check("character-workplace-isolated-list", other_characters == [])
+for method, body in (("GET", None), ("PUT", {"summary": "wrong world"}), ("DELETE", None)):
+    status, _, _ = request(
+        method,
+        f"/studio/api/v1/workplaces/{other_workplace_id}/characters/{character_id}",
+        body,
+    )
+    assert status == 404, (method, status)
+check("character-workplace-isolated-detail", True)
+
+archived_character = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters",
+    {"name": "Temporary Character"},
+    201,
+)
+archived_character_id = archived_character["id"]
+archived = json_request(
+    "DELETE",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters/{archived_character_id}",
+)
+check("character-soft-deleted", bool(archived["archived_at"]))
+characters_after_archive = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/characters"
+)
+check(
+    "character-archive-hidden",
+    all(item["id"] != archived_character_id for item in characters_after_archive),
+)
+status, _, _ = request(
+    "GET",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters/{archived_character_id}",
+)
+check("archived-character-404", status == 404)
+
+scene = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes",
+    {
+        "title": "The Drowned District",
+        "summary": "A confrontation at the tide line.",
+        "sort_order": 1,
+        "status": "draft",
+        "given_circumstances": {
+            "time": "Before dawn",
+            "place": "The northern harbor",
+            "environment": "Fog and low tide",
+            "background": "The district was abandoned ten years ago.",
+            "prior_events": "Mara found the old survey map.",
+        },
+        "dramatic_situation": {
+            "central_question": "Will Mara admit why she returned?",
+            "primary_conflict": "Mara wants the truth; Ilyan wants her gone.",
+            "turn": "Ilyan reveals the lighthouse was never abandoned.",
+        },
+        "dialogue": "MARA\nYou came back.",
+        "direction": {
+            "blocking": "Mara stays between Ilyan and the stairs.",
+            "spatial": "A narrow pier above black water.",
+            "performance_direction": "Speak quietly.",
+            "camera": "Hold on the map in Mara's hand.",
+        },
+    },
+    201,
+)
+scene_id = scene["id"]
+check(
+    "scene-created",
+    scene["workplace_id"] == workplace_id
+    and scene["given_circumstances"]["time"] == "Before dawn"
+    and scene["direction"]["camera"].startswith("Hold"),
+)
+scenes = json_request("GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes")
+check("scene-listed", any(item["id"] == scene_id for item in scenes))
+
+updated_scene = json_request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}",
+    {
+        "status": "ready",
+        "dramatic_situation": {"turn": "The lamp is still warm."},
+        "direction": {"spatial": "The tide has covered the lower stair."},
+    },
+)
+check(
+    "scene-updated-partially",
+    updated_scene["status"] == "ready"
+    and updated_scene["dramatic_situation"]["turn"] == "The lamp is still warm."
+    and updated_scene["dramatic_situation"]["central_question"]
+    == "Will Mara admit why she returned?"
+    and updated_scene["direction"]["blocking"].startswith("Mara stays")
+    and updated_scene["direction"]["spatial"].startswith("The tide"),
+)
+
+status, body, _ = request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}",
+    {"given_circumstances": {"unsupported_field": "value"}},
+)
+check(
+    "scene-nested-fields-validated",
+    status == 400 and json.loads(body)["error"]["code"] == "VALIDATION_ERROR",
+)
+status, body, _ = request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}",
+    {"status": "published"},
+)
+check(
+    "scene-status-validated",
+    status == 400 and json.loads(body)["error"]["code"] == "VALIDATION_ERROR",
+)
+
+cast = json_request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/cast",
+    {
+        "cast": [
+            {
+                "character_id": character_id,
+                "objective": "Make Ilyan admit he lied.",
+                "action": "Ask a question he cannot answer.",
+                "conflict": "Ilyan refuses to look at the map.",
+                "emotional_state": "Controlled anger.",
+                "performance_direction": "Do not raise her voice.",
+                "subtext": "She already knows.",
+                "sort_order": 0,
+            }
+        ]
+    },
+)
+check(
+    "scene-cast-created",
+    len(cast) == 1
+    and cast[0]["character_id"] == character_id
+    and cast[0]["character_name"] == "Mara Vale"
+    and cast[0]["objective"].startswith("Make Ilyan"),
+)
+cast_read = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/cast"
+)
+check("scene-cast-read", cast_read == cast)
+
+second_scene = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes",
+    {
+        "title": "The Empty Lighthouse",
+        "summary": "What remains after the argument.",
+        "sort_order": 2,
+    },
+    201,
+)
+second_scene_id = second_scene["id"]
+json_request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/cast",
+    {
+        "cast": [
+            {
+                "character_id": character_id,
+                "objective": "Protect the evidence.",
+                "action": "Block the stair.",
+                "conflict": "She cannot guard it forever.",
+                "emotional_state": "Exhausted resolve.",
+            }
+        ]
+    },
+)
+check(
+    "same-character-multiple-scenes",
+    len(json_request(
+        "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/cast"
+    )) == 1
+    and len(json_request(
+        "GET",
+        f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/cast",
+    )) == 1,
+)
+
+other_character = json_request(
+    "POST",
+    f"/studio/api/v1/workplaces/{other_workplace_id}/characters",
+    {"name": "Ilyan Ro", "role": "Antagonist"},
+    201,
+)
+status, body, _ = request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/cast",
+    {
+        "cast": [
+            {"character_id": character_id, "objective": "Valid replacement."},
+            {
+                "character_id": other_character["id"],
+                "objective": "Cross-workplace reference.",
+            },
+        ]
+    },
+)
+error = json.loads(body)["error"]
+check(
+    "scene-cast-rejects-other-workplace",
+    status == 422 and error["code"] == "INVALID_CAST_CHARACTER",
+)
+cast_after_rejection = json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/cast"
+)
+check(
+    "scene-cast-transaction-preserved",
+    len(cast_after_rejection) == 1
+    and cast_after_rejection[0]["objective"] == "Protect the evidence.",
+)
+status, body, _ = request(
+    "PUT",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}/cast",
+    {
+        "cast": [
+            {"character_id": character_id, "objective": "First entry."},
+            {"character_id": character_id, "objective": "Duplicate entry."},
+        ]
+    },
+)
+check(
+    "scene-cast-rejects-duplicates",
+    status == 400 and json.loads(body)["error"]["code"] == "VALIDATION_ERROR",
+)
+
+for method, body in (("GET", None), ("PUT", {"summary": "wrong world"}), ("DELETE", None)):
+    status, _, _ = request(
+        method,
+        f"/studio/api/v1/workplaces/{other_workplace_id}/scenes/{scene_id}",
+        body,
+    )
+    assert status == 404, (method, status)
+check("scene-workplace-isolated", True)
+
+deleted_scene = json_request(
+    "DELETE",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}",
+)
+check("scene-soft-deleted", bool(deleted_scene["deleted_at"]))
+status, _, _ = request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/scenes/{second_scene_id}"
+)
+check("deleted-scene-404", status == 404)
+json_request(
+    "GET", f"/studio/api/v1/workplaces/{workplace_id}/characters/{character_id}"
+)
+check("scene-delete-keeps-character", True)
+
 manuscript = json_request(
     "POST",
     f"/studio/api/v1/workplaces/{workplace_id}/documents",
@@ -283,6 +619,9 @@ check("disconnect-does-not-write", unchanged["content"] == "hello brave world")
 
 for path in (
     f"/studio/api/v1/workplaces/{uuid.uuid4()}",
+    f"/studio/api/v1/workplaces/{workplace_id}/characters/{uuid.uuid4()}",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{uuid.uuid4()}",
+    f"/studio/api/v1/workplaces/{workplace_id}/scenes/{scene_id}/cast/{uuid.uuid4()}",
     f"/studio/api/v1/workplaces/{workplace_id}/documents/{uuid.uuid4()}",
     f"/studio/api/v1/workplaces/{workplace_id}/documents/{document_id}/versions/{uuid.uuid4()}",
 ):
@@ -300,6 +639,8 @@ if STATE_PATH:
         json.dump(
             {
                 "workplace_id": workplace_id,
+                "character_id": character_id,
+                "scene_id": scene_id,
                 "document_id": document_id,
                 "revision": unchanged["revision"],
                 "content": unchanged["content"],
